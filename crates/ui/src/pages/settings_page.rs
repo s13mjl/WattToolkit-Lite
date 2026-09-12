@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use wtlite_core::model::ProxyMode;
 
 /// Secondary-development repository link (to be filled in by the author).
-pub const SECONDARY_REPO_URL: &str = "https://github.com/your-name/WattToolkit-Lite";
+pub const SECONDARY_REPO_URL: &str = "https://github.com/s13mjl/WattToolkit-Lite";
 
 /// Upstream project link.
 pub const UPSTREAM_REPO_URL: &str = "https://github.com/BeyondDimension/SteamTools";

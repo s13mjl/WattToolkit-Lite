@@ -61,7 +61,7 @@ cargo build --release
 ## 关于页链接
 
 - 上游项目：https://github.com/BeyondDimension/SteamTools
-- 二次开发：https://github.com/your-name/WattToolkit-Lite （占位，请在 `crates/ui/src/pages/settings_page.rs` 中替换 `SECONDARY_REPO_URL`）
+- 二次开发：https://github.com/s13mjl/WattToolkit-Lite
 
 ## 许可证
 
