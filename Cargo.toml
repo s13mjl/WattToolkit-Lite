@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/ui",
+    "crates/loader",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["WattToolkit-Lite contributors"]
+repository = "https://github.com/BeyondDimension/SteamTools"
