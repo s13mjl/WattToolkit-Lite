@@ -32,6 +32,8 @@ pub fn set_tray_state(t: Arc<Mutex<TrayState>>) {
     let _ = TRAY_STATE.set(t);
 }
 
+
+
 /// Main application.
 pub struct App {
     pub settings: Settings,
@@ -86,8 +88,43 @@ impl ProxySettingsDialog {
     }
 }
 
+/// Load a CJK-capable system font (egui's bundled fonts contain no
+/// Chinese glyphs, which makes every Chinese label render as blank).
+fn setup_fonts(ctx: &egui::Context) {
+    const CANDIDATES: [&str; 5] = [
+        r"C:\Windows\Fonts\msyh.ttc", // Microsoft YaHei (TTC, index 0)
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\simhei.ttf", // SimHei
+        r"C:\Windows\Fonts\simsun.ttc", // SimSun
+        r"C:\Windows\Fonts\Deng.ttf",   // DengXian
+    ];
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
+                .push("cjk".to_owned());
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Monospace)
+                .unwrap()
+                .push("cjk".to_owned());
+            ctx.set_fonts(fonts);
+            log::info!("UI font loaded: {path}");
+            return;
+        }
+    }
+    log::warn!("no CJK font found on this system; Chinese text may not render");
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_fonts(&cc.egui_ctx);
         let settings = Settings::load();
         let proxy = ProxyManager::new();
         let accel = AccelerateService::new();
@@ -99,6 +136,9 @@ impl App {
                 exit: false,
             })));
         let ids = settings.proxy.support_proxy_services_status.clone();
+        // Attach the proxy log receiver; without this every internal proxy log
+        // line (listener start, CONNECT tunnels, errors) is silently dropped.
+        let log_rx = proxy.take_log_rx();
 
         let icon = pages::settings_page::APP_ICON
             .clone()
@@ -109,7 +149,7 @@ impl App {
             accel,
             main_tab: MainTab::Accelerator,
             logs: VecDeque::with_capacity(1000),
-            log_rx: None,
+            log_rx,
             tray,
             proxy_dialog: None,
             cert_dialog: None,
@@ -117,8 +157,40 @@ impl App {
             accel_loaded: false,
             icon,
         };
-        app.accel.apply_enabled(&ids);
+        // Load acceleration projects (local cache or built-in) and restore the
+        // enabled state: on first run nothing is checked by default; on later
+        // runs the previously saved IDs (support_proxy_services_status) are
+        // restored automatically.
+        let _ = app.accel.load_sync();
+        let enabled = ids; // empty on first run = nothing selected
+        app.accel.apply_enabled(&enabled);
+        // Collapse all platform groups by default at startup.
+        {
+            let mut st = crate::pages::GLOBAL_ACC.lock().unwrap();
+            for grp in app.accel.groups() {
+                st.collapsed.insert(grp.name);
+            }
+        }
         app
+    }
+
+    /// Switch the acceleration mode (persisted). If the proxy is running,
+    /// restart it immediately so the new mode takes effect.
+    pub fn switch_proxy_mode(&mut self, mode: ProxyMode) {
+        if self.settings.proxy.proxy_mode == mode {
+            return;
+        }
+        let was_running = self.proxy.is_running();
+        self.settings.proxy.proxy_mode = mode;
+        let _ = self.settings.save();
+        if was_running {
+            self.proxy.stop();
+            let groups = self.accel.groups();
+            let settings = self.settings.proxy.clone();
+            crate::pages::accelerator::start_async(self, mode, settings, groups);
+        } else {
+            self.set_toast(format!("加速模式: {}", mode.display_name()));
+        }
     }
 
     pub fn push_log(&mut self, line: String) {
@@ -161,6 +233,11 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Surface any proxy start failure reported by the background thread.
+        if let Some(err) = pages::accelerator::START_ERROR.lock().unwrap().take() {
+            self.push_log(format!("[ERROR] 启动加速失败: {err}"));
+            self.set_toast(format!("启动加速失败: {err}"));
+        }
         // Drain incoming proxy logs.
         let mut drained = Vec::new();
         if let Some(rx) = self.log_rx.as_mut() {
@@ -218,7 +295,6 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| match self.main_tab {
             MainTab::Accelerator => pages::accelerator::show(self, ui),
             MainTab::Settings => pages::settings_page::show(self, ui),
-
         });
 
         // Toast.

@@ -5,7 +5,7 @@
 //! chain is: local cache -> built-in.
 
 use crate::data;
-use crate::model::{AccelerateProjectGroup, ProxyType};
+use crate::model::AccelerateProjectGroup;
 use crate::paths;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
@@ -35,6 +35,13 @@ impl AccelerateService {
         }
     }
 
+    fn store(&self, groups: Vec<AccelerateProjectGroup>, source: &str) {
+        let mut g = self.inner.write().unwrap();
+        g.groups = groups.clone();
+        g.source = source.to_string();
+        g.loaded_at = Some(SystemTime::now());
+    }
+
     /// Load groups: local cache first, then built-in.
     pub async fn load(&self) -> Result<Vec<AccelerateProjectGroup>, String> {
         // 1. Local cache.
@@ -43,10 +50,7 @@ impl AccelerateService {
             if let Ok(bytes) = tokio::fs::read(&path).await {
                 if let Ok(groups) = serde_json::from_slice::<Vec<AccelerateProjectGroup>>(&bytes) {
                     if !groups.is_empty() {
-                        let mut g = self.inner.write().unwrap();
-                        g.groups = groups.clone();
-                        g.source = "local cache".into();
-                        g.loaded_at = Some(SystemTime::now());
+                        self.store(groups.clone(), "local cache");
                         return Ok(groups);
                     }
                 }
@@ -54,10 +58,25 @@ impl AccelerateService {
         }
         // 2. Built-in fallback.
         let groups = data::built_in_groups();
-        let mut g = self.inner.write().unwrap();
-        g.groups = groups.clone();
-        g.source = "built-in".into();
-        g.loaded_at = Some(SystemTime::now());
+        self.store(groups.clone(), "built-in");
+        Ok(groups)
+    }
+
+    /// Synchronous variant used by the UI at startup (std::fs read).
+    pub fn load_sync(&self) -> Result<Vec<AccelerateProjectGroup>, String> {
+        let path = paths::local_accelerate_path();
+        if path.exists() {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if let Ok(groups) = serde_json::from_slice::<Vec<AccelerateProjectGroup>>(&bytes) {
+                    if !groups.is_empty() {
+                        self.store(groups.clone(), "local cache");
+                        return Ok(groups);
+                    }
+                }
+            }
+        }
+        let groups = data::built_in_groups();
+        self.store(groups.clone(), "built-in");
         Ok(groups)
     }
 
@@ -86,19 +105,4 @@ impl Default for AccelerateService {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Collect the default enabled IDs (all built-in Steam groups) used on first run.
-pub fn default_enabled_ids(groups: &[AccelerateProjectGroup]) -> Vec<String> {
-    let mut out = Vec::new();
-    for grp in groups {
-        for proj in &grp.items {
-            for leaf in proj.all_leaves() {
-                if leaf.proxy_type == ProxyType::Normal {
-                    out.push(leaf.id.clone());
-                }
-            }
-        }
-    }
-    out
 }

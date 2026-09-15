@@ -24,6 +24,8 @@ pub struct AccState {
     pub tab: AccTab,
     pub net_test_results: Vec<wtlite_core::nettest::TestResult>,
     pub testing: bool,
+    /// Group names that are currently collapsed (empty = all expanded).
+    pub collapsed: HashSet<String>,
 }
 
 impl Default for AccState {
@@ -32,6 +34,7 @@ impl Default for AccState {
             tab: AccTab::Platform,
             net_test_results: Vec::new(),
             testing: false,
+            collapsed: HashSet::new(),
         }
     }
 }
@@ -117,6 +120,26 @@ fn right_panel(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.add_space(8.0);
 
+    // 加速模式快速切换（原项目代理设置中的模式选择）。
+    crate::pages::hrow(ui, |ui| {
+        ui.label("加速模式:");
+        let m = app.settings.proxy.proxy_mode;
+        egui::ComboBox::from_id_salt("accel_mode")
+            .selected_text(m.display_name())
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                for mode in wtlite_core::model::ProxyMode::available() {
+                    let selected = *mode == app.settings.proxy.proxy_mode;
+                    if ui.selectable_label(selected, mode.display_name()).clicked() {
+                        app.switch_proxy_mode(*mode);
+                    }
+                }
+            });
+    });
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+
     if ui.button("代理设置").clicked() {
         app.proxy_dialog = Some(crate::ProxySettingsDialog::from_settings(&app.settings.proxy));
     }
@@ -164,8 +187,15 @@ fn right_panel(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Start the proxy on a background thread (its own tokio runtime).
-fn start_async(
+/// Last proxy start error, surfaced to the UI on the next frame.
+pub static START_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Start the proxy on a background thread.
+///
+/// The runtime is owned by `ProxyManager` (`start_blocking`), because the
+/// listeners are spawned tasks: a runtime that dies with this thread would
+/// cancel them, leaving the UI reporting "running" while nothing is bound.
+pub(crate) fn start_async(
     app: &mut App,
     mode: ProxyMode,
     settings: wtlite_core::settings::ProxySettings,
@@ -173,17 +203,15 @@ fn start_async(
 ) {
     let proxy = app.proxy.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let res = rt.block_on(async move { proxy.start(mode, &settings, &groups).await });
-        match res {
-            Ok(()) => log::info!("proxy started"),
-            Err(e) => log::error!("proxy start failed: {e}"),
+        match proxy.start_blocking(mode, &settings, &groups) {
+            Ok(()) => log::info!("proxy started ({mode:?})"),
+            Err(e) => {
+                log::error!("proxy start failed: {e}");
+                *START_ERROR.lock().unwrap() = Some(e);
+            }
         }
     });
-    app.set_toast("正在启动加速…");
+    app.set_toast(format!("正在启动加速…（{}）", mode.display_name()));
 }
 
 fn platform_tab(app: &mut App, ui: &mut egui::Ui) {
@@ -192,28 +220,93 @@ fn platform_tab(app: &mut App, ui: &mut egui::Ui) {
         ui.label("尚未加载加速项目。");
         return;
     }
-    for grp in &groups {
-        ui.add_space(6.0);
-        let mut on = grp.three_state_enable == Some(true);
-        if ui.checkbox(&mut on, &grp.name).changed() {
-            set_group_enable(app, &grp.name, on);
-        }
-        crate::pages::indent(ui, grp.name.as_str(), |ui| {
-            for proj in &grp.items {
-                project_tree(app, ui, proj, 0);
+    let mut toggled: Option<String> = None;
+    {
+        let st = crate::pages::GLOBAL_ACC.lock().unwrap();
+        for grp in &groups {
+            ui.add_space(4.0);
+            let grp_name = grp.name.clone();
+            let open = !st.collapsed.contains(&grp_name);
+            // Group header row: [arrow] [checkbox] name (n 项)
+            let mut on = group_enabled(grp);
+            crate::pages::hrow(ui, |ui| {
+                let arrow = if open { "▾" } else { "▸" };
+                if ui.add(egui::Button::new(arrow).small()).clicked() {
+                    toggled = Some(grp_name.clone());
+                }
+                if ui
+                    .checkbox(&mut on, format!("{} ({} 项)", grp.name, count_group_items(grp)))
+                    .changed()
+                {
+                    set_group_enable(app, &grp.name, on);
+                }
+            });
+            if open {
+                ui.indent(grp_name.as_str(), |ui| {
+                    for proj in &grp.items {
+                        project_tree(app, ui, proj);
+                    }
+                });
             }
-        });
+        }
+    }
+    if let Some(name) = toggled {
+        let mut st = crate::pages::GLOBAL_ACC.lock().unwrap();
+        if st.collapsed.contains(&name) {
+            st.collapsed.remove(&name);
+        } else {
+            st.collapsed.insert(name);
+        }
     }
 }
 
-fn project_tree(app: &mut App, ui: &mut egui::Ui, proj: &AccelerateProject, depth: usize) {
-    let label = format!("{} ({} 个域名)", proj.name, count_domains(&proj.listen_domain_names));
-    let mut on = proj.three_state_enable == Some(true);
-    if ui.add_enabled(depth < 1, egui::Checkbox::new(&mut on, &label)).changed() {
-        set_project_enable(app, &proj.id, on);
+/// True when every leaf project in the group is enabled.
+fn group_enabled(grp: &AccelerateProjectGroup) -> bool {
+    let mut all = true;
+    let mut any = false;
+    for p in &grp.items {
+        for leaf in p.all_leaves() {
+            any = true;
+            if leaf.three_state_enable != Some(true) {
+                all = false;
+            }
+        }
     }
-    for child in &proj.items {
-        project_tree(app, ui, child, depth + 1);
+    all && any
+}
+
+/// Total leaf count in a group.
+fn count_group_items(grp: &AccelerateProjectGroup) -> usize {
+    grp.items.iter().map(|p| p.all_leaves().len()).sum()
+}
+
+/// Total leaf count under a project (including itself when it is a leaf).
+fn count_group_leaves(proj: &AccelerateProject) -> usize {
+    if proj.items.is_empty() {
+        1
+    } else {
+        proj.items.iter().map(|c| count_group_leaves(c)).sum()
+    }
+}
+
+fn project_tree(app: &mut App, ui: &mut egui::Ui, proj: &AccelerateProject) {
+    if proj.items.is_empty() {
+        let label = format!("{} ({} 个域名)", proj.name, count_domains(&proj.listen_domain_names));
+        let mut on = proj.three_state_enable == Some(true);
+        if ui.checkbox(&mut on, &label).changed() {
+            set_project_enable(app, &proj.id, on);
+        }
+    } else {
+        egui::CollapsingHeader::new(format!("{} ({} 项)", proj.name, count_group_leaves(proj)))
+            .id_salt(proj.id.clone())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.indent(proj.id.clone(), |ui| {
+                    for child in &proj.items {
+                        project_tree(app, ui, child);
+                    }
+                });
+            });
     }
 }
 

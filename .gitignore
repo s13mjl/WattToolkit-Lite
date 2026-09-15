@@ -1,0 +1,5 @@
+# Third-party driver binaries (place WinDivert.dll next to the exe at runtime)
+WinDivert.dll
+WinDivert*.sys
+WinDivert*.lib
+WinDivert*.h

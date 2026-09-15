@@ -2,9 +2,9 @@
 //! system proxy / PAC registry writes, and the WinDivert DNS interceptor.
 
 use crate::cert::CertificateManager;
-use crate::fwd::{run_forward_proxy, FwdRuntime};
+use crate::fwd::{run_forward_proxy_on, FwdRuntime};
 use crate::hosts;
-use crate::mitm::{run_mitm, MitmRuntime};
+use crate::mitm::{run_mitm_on, MitmRuntime};
 use crate::model::{AccelerateProjectGroup, ProxyMode};
 use crate::settings::ProxySettings;
 use crate::sysproxy;
@@ -36,12 +36,20 @@ pub struct ProxyManager {
 struct Inner {
     running: bool,
     mode: Option<ProxyMode>,
+    /// Runtime owned by the manager. It must outlive `start()`: the listeners
+    /// are `tokio::spawn`ed tasks, so dropping the caller's temporary runtime
+    /// would silently cancel every listener (UI shows "running" while nothing
+    /// is actually bound).
+    runtime: Option<Arc<tokio::runtime::Runtime>>,
     tasks: Vec<JoinHandle<()>>,
     windivert_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pub stats: Arc<Mutex<FlowStats>>,
     pub config: Arc<RwLock<ProxySettings>>,
     pub domains: Arc<RwLock<HashSet<String>>>,
+    /// Blocked host -> reachable substitute hostname to dial upstream
+    /// (the original `ForwardDestination`/`TlsSni` mechanism).
+    pub forward: Arc<RwLock<std::collections::HashMap<String, String>>>,
     pub started_at: Option<SystemTime>,
 }
 
@@ -50,17 +58,20 @@ impl ProxyManager {
         let stats = Arc::new(Mutex::new(FlowStats::default()));
         let config = Arc::new(RwLock::new(ProxySettings::default()));
         let domains = Arc::new(RwLock::new(HashSet::new()));
+        let forward = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 running: false,
                 mode: None,
+                runtime: None,
                 tasks: Vec::new(),
                 windivert_stop: None,
                 log_tx: None,
                 stats,
                 config,
                 domains,
+                forward,
                 started_at: None,
             })),
             cert: Arc::new(CertificateManager::new()),
@@ -89,6 +100,37 @@ impl ProxyManager {
     /// Take the log receiver (once) for the UI to drain.
     pub fn take_log_rx(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
         self.log_rx.lock().unwrap().take()
+    }
+
+    /// Start the proxy on a runtime owned by this manager.
+    ///
+    /// This is the entry point used by the UI. The spawned listener tasks need
+    /// a runtime that outlives the call, otherwise they are cancelled the moment
+    /// the caller's temporary runtime is dropped.
+    pub fn start_blocking(
+        &self,
+        mode: ProxyMode,
+        settings: &ProxySettings,
+        groups: &[AccelerateProjectGroup],
+    ) -> Result<(), String> {
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(|e| format!("create tokio runtime failed: {e}"))?,
+        );
+        {
+            let mut g = self.inner.lock().unwrap();
+            g.runtime = Some(rt.clone());
+        }
+        let res = rt.block_on(async { self.start(mode, settings, groups).await });
+        if res.is_err() {
+            // Roll back: drop the runtime and its listeners.
+            let mut g = self.inner.lock().unwrap();
+            g.runtime = None;
+        }
+        res
     }
 
     /// Start the proxy in the given mode.
@@ -122,14 +164,54 @@ impl ProxyManager {
                 }
             }
         }
+        // Blocked host -> reachable substitute hostname (original
+        // `ForwardDestination` + `TlsSni`). Mirrors the official data, where
+        // sites are aliased onto their CDN hostnames.
+        let mut forward: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for grp in groups {
+            if grp.three_state_enable != Some(true) {
+                continue;
+            }
+            for proj in &grp.items {
+                for leaf in proj.all_leaves() {
+                    if leaf.three_state_enable != Some(true) {
+                        continue;
+                    }
+                    if let Some(fwd) = &leaf.forward_domain_names {
+                        for host in leaf.listen_domain_names.split(';') {
+                            let host = host.trim().to_lowercase();
+                            if !host.is_empty() && !fwd.trim().is_empty() {
+                                forward.insert(host, fwd.trim().to_lowercase());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         *g.domains.write().unwrap() = domains.clone();
+        *g.forward.write().unwrap() = forward.clone();
         *g.config.write().unwrap() = settings.clone();
+        log::info!(
+            target: "wtlite_core::proxy",
+            "starting proxy: mode={mode:?} port={} domains={} forward={}",
+            settings.system_proxy_port,
+            domains.len(),
+            forward.len()
+        );
+        if domains.is_empty() {
+            log::warn!(
+                target: "wtlite_core::proxy",
+                "no acceleration domains selected - the PAC will proxy nothing"
+            );
+        }
 
         let log_tx = self.log_tx.clone();
         g.log_tx = Some(log_tx.clone());
         let stats = g.stats.clone();
         let config = g.config.clone();
         let domains_arc = g.domains.clone();
+        let forward_arc = g.forward.clone();
         let cert = self.cert.clone();
 
         g.running = true;
@@ -137,6 +219,26 @@ impl ProxyManager {
         g.started_at = Some(SystemTime::now());
 
         drop(g);
+
+        // Shared TLS-termination runtime for the forward-proxy modes: a CONNECT
+        // for a host that needs a substitute upstream hostname is decrypted here
+        // (mirrors the original, whose proxy always terminates TLS with its own
+        // certificate). Missing root cert just disables substitution.
+        let mitm_rt: Option<Arc<MitmRuntime>> = if mode == ProxyMode::Hosts {
+            None
+        } else {
+            cert.root().ok().map(|root| {
+                Arc::new(MitmRuntime {
+                    cm: cert.clone(),
+                    cache: Arc::new(crate::cert::LeafCache::default()),
+                    root,
+                    config: config.clone(),
+                    stats: stats.clone(),
+                    log_tx: log_tx.clone(),
+                    forward: forward_arc.clone(),
+                })
+            })
+        };
 
         match mode {
             ProxyMode::Hosts => {
@@ -156,7 +258,19 @@ impl ProxyManager {
                         return Err(format!("update hosts failed: {e}"));
                     }
                 }
-                // 3. Start MITM listener on 443.
+                // 3. Start MITM listener on 443 (bind first so failures surface).
+                let mitm_bind: SocketAddr =
+                    (IpAddr::from([127, 0, 0, 1]), 443u16).into();
+                let mitm_listener = match tokio::net::TcpListener::bind(mitm_bind).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.stop_inner();
+                        let _ = hosts::remove_by_tag();
+                        return Err(format!(
+                            "端口 443 被占用或无法绑定（可能需要管理员权限）: {e}"
+                        ));
+                    }
+                };
                 let rt = MitmRuntime {
                     cm: cert.clone(),
                     cache: Arc::new(crate::cert::LeafCache::default()),
@@ -164,9 +278,10 @@ impl ProxyManager {
                     config: config.clone(),
                     stats: stats.clone(),
                     log_tx: log_tx.clone(),
+                    forward: forward_arc.clone(),
                 };
                 let task = tokio::spawn(async move {
-                    let _ = run_mitm(IpAddr::from([127, 0, 0, 1]), rt).await;
+                    let _ = run_mitm_on(mitm_listener, rt).await;
                 });
                 let mut g = self.inner.lock().unwrap();
                 g.tasks.push(task);
@@ -174,14 +289,26 @@ impl ProxyManager {
             ProxyMode::System => {
                 let ip: IpAddr = "0.0.0.0".parse().unwrap();
                 let bind: SocketAddr = (ip, settings.system_proxy_port).into();
+                let listener = match tokio::net::TcpListener::bind(bind).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.stop_inner();
+                        return Err(format!(
+                            "端口 {} 被占用或无法绑定，请检查是否已有其他程序在监听: {e}",
+                            settings.system_proxy_port
+                        ));
+                    }
+                };
                 let rt = FwdRuntime {
                     config: config.clone(),
                     domains: domains_arc.clone(),
                     stats: stats.clone(),
                     log_tx: log_tx.clone(),
+                    mitm: mitm_rt.clone(),
+                    forward: forward_arc.clone(),
                 };
                 let task = tokio::spawn(async move {
-                    let _ = run_forward_proxy(bind, rt).await;
+                    let _ = run_forward_proxy_on(listener, rt).await;
                 });
                 // Set the Windows system proxy (no elevation needed, HKCU).
                 if let Err(e) = sysproxy::set_system_proxy(true, "127.0.0.1", settings.system_proxy_port) {
@@ -190,20 +317,42 @@ impl ProxyManager {
                     g.tasks.push(task);
                     return Err(format!("set system proxy failed: {e}"));
                 }
+                log::info!(
+                    target: "wtlite_core::proxy",
+                    "system proxy = 127.0.0.1:{}",
+                    settings.system_proxy_port
+                );
+                log::info!(
+                    target: "wtlite_core::proxy",
+                    "WinINET sees: {}",
+                    sysproxy::describe_effective_proxy()
+                );
                 let mut g = self.inner.lock().unwrap();
                 g.tasks.push(task);
             }
             ProxyMode::Pac => {
                 let ip: IpAddr = "0.0.0.0".parse().unwrap();
                 let bind: SocketAddr = (ip, settings.system_proxy_port).into();
+                let listener = match tokio::net::TcpListener::bind(bind).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.stop_inner();
+                        return Err(format!(
+                            "端口 {} 被占用或无法绑定，请检查是否已有其他程序在监听: {e}",
+                            settings.system_proxy_port
+                        ));
+                    }
+                };
                 let rt = FwdRuntime {
                     config: config.clone(),
                     domains: domains_arc.clone(),
                     stats: stats.clone(),
                     log_tx: log_tx.clone(),
+                    mitm: mitm_rt.clone(),
+                    forward: forward_arc.clone(),
                 };
                 let task = tokio::spawn(async move {
-                    let _ = run_forward_proxy(bind, rt).await;
+                    let _ = run_forward_proxy_on(listener, rt).await;
                 });
                 let pac_url = format!(
                     "http://127.0.0.1:{}/proxy.pac",
@@ -215,6 +364,15 @@ impl ProxyManager {
                     g.tasks.push(task);
                     return Err(format!("set PAC proxy failed: {e}"));
                 }
+                log::info!(
+                    target: "wtlite_core::proxy",
+                    "AutoConfigURL = {pac_url}"
+                );
+                log::info!(
+                    target: "wtlite_core::proxy",
+                    "WinINET sees: {}",
+                    sysproxy::describe_effective_proxy()
+                );
                 let mut g = self.inner.lock().unwrap();
                 g.tasks.push(task);
             }
@@ -222,14 +380,26 @@ impl ProxyManager {
                 // Start the forward proxy to receive redirected traffic.
                 let ip: IpAddr = "0.0.0.0".parse().unwrap();
                 let bind: SocketAddr = (ip, settings.system_proxy_port).into();
+                let listener = match tokio::net::TcpListener::bind(bind).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.stop_inner();
+                        return Err(format!(
+                            "端口 {} 被占用或无法绑定，请检查是否已有其他程序在监听: {e}",
+                            settings.system_proxy_port
+                        ));
+                    }
+                };
                 let rt = FwdRuntime {
                     config: config.clone(),
                     domains: domains_arc.clone(),
                     stats: stats.clone(),
                     log_tx: log_tx.clone(),
+                    mitm: mitm_rt.clone(),
+                    forward: forward_arc.clone(),
                 };
                 let task = tokio::spawn(async move {
-                    let _ = run_forward_proxy(bind, rt).await;
+                    let _ = run_forward_proxy_on(listener, rt).await;
                 });
                 // Start the WinDivert DNS interceptor on a blocking thread.
                 let wd = Arc::new(DnsInterceptRuntime::new(
@@ -283,6 +453,12 @@ impl ProxyManager {
         g.running = false;
         g.mode = None;
         g.started_at = None;
+        // Drop the manager-owned runtime so its listeners are released too.
+        if let Some(rt) = g.runtime.take() {
+            Arc::try_unwrap(rt)
+                .map(|rt| rt.shutdown_background())
+                .ok();
+        }
     }
 }
 

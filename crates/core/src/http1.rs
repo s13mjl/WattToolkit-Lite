@@ -48,9 +48,7 @@ pub async fn read_request<R: AsyncReadExt + Unpin>(mut reader: &mut R) -> Option
             Ok(0) => return None,
             Ok(_) => {
                 buf.push(byte[0]);
-                if buf.ends_with(b"
-
-") {
+                if buf.ends_with(b"\r\n\r\n") {
                     break;
                 }
                 if buf.len() > 65536 {
@@ -93,8 +91,7 @@ pub async fn read_request<R: AsyncReadExt + Unpin>(mut reader: &mut R) -> Option
                     Ok(0) => return None,
                     Ok(_) => {
                         size_buf.push(byte[0]);
-                        if size_buf.ends_with(b"
-") {
+                        if size_buf.ends_with(b"\r\n") {
                             break;
                         }
                         if size_buf.len() > 32 {
@@ -154,8 +151,7 @@ pub fn write_request(req: &HttpRequest, host: &str, port: u16, absolute: bool) -
     } else {
         out.extend_from_slice(req.path.as_bytes());
     }
-    out.extend_from_slice(b" HTTP/1.1
-");
+    out.extend_from_slice(b" HTTP/1.1\r\n");
     let mut has_host = false;
     let mut has_conn = false;
     for (k, v) in &req.headers {
@@ -167,26 +163,21 @@ pub fn write_request(req: &HttpRequest, host: &str, port: u16, absolute: bool) -
         }
         if kl == "host" {
             has_host = true;
-            out.extend_from_slice(format!("Host: {host}:{port}
-").as_bytes());
+            out.extend_from_slice(format!("Host: {host}:{port}\r\n").as_bytes());
             continue;
         }
         if kl == "connection" {
             has_conn = true;
         }
-        out.extend_from_slice(format!("{k}: {v}
-").as_bytes());
+        out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
     }
     if !has_host {
-        out.extend_from_slice(format!("Host: {host}:{port}
-").as_bytes());
+        out.extend_from_slice(format!("Host: {host}:{port}\r\n").as_bytes());
     }
     if !has_conn {
-        out.extend_from_slice(b"Connection: keep-alive
-");
+        out.extend_from_slice(b"Connection: keep-alive\r\n");
     }
-    out.extend_from_slice(b"
-");
+    out.extend_from_slice(b"\r\n");
     out.extend_from_slice(&req.body);
     out
 }
@@ -206,9 +197,7 @@ pub async fn read_response_head<R: AsyncReadExt + Unpin>(reader: &mut R) -> Opti
             Ok(0) => return None,
             Ok(_) => {
                 buf.push(byte[0]);
-                if buf.ends_with(b"
-
-") {
+                if buf.ends_with(b"\r\n\r\n") {
                     break;
                 }
                 if buf.len() > 65536 {
@@ -261,8 +250,7 @@ pub async fn stream_response_body<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Un
 
     // Write the response head to the client.
     let mut out = Vec::new();
-    out.extend_from_slice(format!("HTTP/1.1 {} {}
-", head.status, head.reason).as_bytes());
+    out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", head.status, head.reason).as_bytes());
     for (k, v) in &head.headers {
         let kl = k.to_lowercase();
         if kl == "transfer-encoding" && !chunked {
@@ -271,15 +259,12 @@ pub async fn stream_response_body<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Un
         if kl == "connection" {
             continue;
         }
-        out.extend_from_slice(format!("{k}: {v}
-").as_bytes());
+        out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
     }
     if !keep_alive {
-        out.extend_from_slice(b"Connection: close
-");
+        out.extend_from_slice(b"Connection: close\r\n");
     }
-    out.extend_from_slice(b"
-");
+    out.extend_from_slice(b"\r\n");
     writer.write_all(&out).await.map_err(|_| ())?;
 
     if chunked {
@@ -314,8 +299,7 @@ async fn read_chunk_size<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<usiz
             Ok(0) => return Err(()),
             Ok(_) => {
                 size_buf.push(byte[0]);
-                if size_buf.ends_with(b"
-") {
+                if size_buf.ends_with(b"\r\n") {
                     break;
                 }
                 if size_buf.len() > 32 {
@@ -353,23 +337,54 @@ async fn stream_exact_n<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Establish an upstream TCP connection to host:port with a timeout.
+/// Per-candidate connect budget, matching the original `TunnelMiddleware`
+/// (`connectTimeout = TimeSpan.FromSeconds(10d)`). Candidates are raced, so the
+/// total wait is one timeout, not one per address.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Try every candidate concurrently and return the first connection that wins.
+async fn race_connect(
+    addrs: &[std::net::SocketAddr],
+    timeout: std::time::Duration,
+) -> Option<TcpStream> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<TcpStream>(1);
+    let mut spawned = 0usize;
+    for addr in addrs.iter().take(8) {
+        let tx = tx.clone();
+        let addr = *addr;
+        tokio::spawn(async move {
+            if let Ok(Ok(stream)) = tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+                let _ = tx.send(stream).await;
+            }
+        });
+        spawned += 1;
+    }
+    drop(tx);
+    if spawned == 0 {
+        return None;
+    }
+    rx.recv().await
+}
+
+/// Establish an upstream TCP connection to host:port.
+///
+/// Every candidate is raced together: the accelerated-DNS answers *and* the
+/// system-resolved ones. Trying the custom DNS first and only falling back on
+/// failure wasted the full timeout whenever that answer was unreachable (e.g.
+/// a DoH endpoint returning a blocked region IP while the system resolver has a
+/// reachable one) - the original streams all endpoints and keeps the first that
+/// connects.
 pub async fn connect_upstream(host: &str, port: u16, ips: &[std::net::IpAddr]) -> Option<TcpStream> {
-    let candidates: Vec<std::net::SocketAddr> = if ips.is_empty() {
-        match tokio::net::lookup_host((host, port)).await {
-            Ok(addrs) => addrs.collect(),
-            Err(_) => return None,
-        }
-    } else {
-        ips.iter()
-            .map(|ip| std::net::SocketAddr::new(*ip, port))
-            .collect()
-    };
-    for addr in candidates {
-        match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(addr)).await {
-            Ok(Ok(s)) => return Some(s),
-            _ => {}
+    let mut candidates: Vec<std::net::SocketAddr> = ips
+        .iter()
+        .map(|ip| std::net::SocketAddr::new(*ip, port))
+        .collect();
+    if let Ok(addrs) = tokio::net::lookup_host((host, port)).await {
+        for a in addrs {
+            if !candidates.contains(&a) {
+                candidates.push(a);
+            }
         }
     }
-    None
+    race_connect(&candidates, CONNECT_TIMEOUT).await
 }

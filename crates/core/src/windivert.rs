@@ -44,6 +44,7 @@ impl DnsInterceptRuntime {
     }
 
     fn send_log(&self, msg: String) {
+        log::info!(target: "wtlite_core::proxy", "{msg}");
         let _ = self.log_tx.send(msg);
     }
 

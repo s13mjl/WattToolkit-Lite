@@ -65,16 +65,51 @@ pub fn dns_servers() -> Vec<&'static str> {
 }
 
 /// Resolve a hostname to IPv4 addresses.
+///
+/// Mirrors the original `DomainResolver.ResolveAsync` fallback chain so a
+/// poisoned or unreachable resolver cannot silently break acceleration:
+/// DoH (when enabled) -> configured plain DNS -> system resolver.
+///
+/// When no DoH endpoint is configured, every known endpoint is raced against
+/// the real hostname and the first that answers wins. Probing a fixed test
+/// domain instead would misjudge the whole DoH set whenever that one name
+/// happens to fail (the original resolves the actual host too).
 pub async fn resolve_a(host: &str, dns: &str, use_doh: bool, doh_address: &str) -> Vec<IpAddr> {
-    if use_doh && !doh_address.is_empty() {
-        return resolve_doh(host, doh_address).await;
+    let mut out = Vec::new();
+    if use_doh {
+        if !doh_address.is_empty() {
+            out = resolve_doh(host, doh_address).await;
+        } else {
+            out = race_doh(host).await;
+        }
     }
-    let server: Option<IpAddr> = dns
-        .trim()
-        .parse::<IpAddr>()
-        .ok()
-        .filter(|_| dns.trim() != "System Default");
-    resolve_udp(host, server).await
+    if out.is_empty() {
+        let server: Option<IpAddr> = dns
+            .trim()
+            .parse::<IpAddr>()
+            .ok()
+            .filter(|_| dns.trim() != "System Default");
+        out = resolve_udp(host, server).await;
+    }
+    out
+}
+
+/// Race every known DoH endpoint against `host` and take the first non-empty
+/// answer.
+async fn race_doh(host: &str) -> Vec<IpAddr> {
+    let mut tasks = Vec::new();
+    for addr in doh_addresses() {
+        let host = host.to_string();
+        tasks.push(tokio::spawn(async move { resolve_doh(&host, addr).await }));
+    }
+    for t in tasks {
+        if let Ok(ips) = t.await {
+            if !ips.is_empty() {
+                return ips;
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// Resolve via DNS-over-HTTPS (JSON API), mirroring DnsDohAnalysisService.
@@ -84,15 +119,21 @@ pub async fn resolve_doh(host: &str, doh_address: &str) -> Vec<IpAddr> {
         doh_address.trim_end_matches('/'),
         urlencoding(host)
     );
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(5)))
-        .build();
-    let agent: ureq::Agent = config.into();
-    let body: Result<Value, String> = (|| {
+    // `ureq` is blocking: running it directly inside a task would occupy a
+    // runtime worker for the whole request (up to the 5s timeout), and the
+    // concurrent DoH probe below launches several at once - that starves the
+    // runtime and stalls unrelated connections (including CONNECT replies).
+    let body: Result<Value, String> = tokio::task::spawn_blocking(move || {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build();
+        let agent: ureq::Agent = config.into();
         let mut resp = agent.get(&url).call().map_err(|e| e.to_string())?;
         let text = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
         serde_json::from_str(&text).map_err(|e| e.to_string())
-    })();
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("doh task failed: {e}")));
     match body {
         Ok(v) => v
             .get("Answer")

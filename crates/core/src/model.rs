@@ -169,19 +169,30 @@ impl AccelerateProject {
         out
     }
 
-    /// Recursively collect enabled project IDs.
+    /// Recursively collect the enabled IDs that are persisted.
+    ///
+    /// Only leaves are collected: a parent node is a container whose state is
+    /// derived from its children, so persisting it would let a stale parent ID
+    /// silently disable every child on the next start (the original project
+    /// persists leaf nodes only - see ProxyService.GetAccelerateEnableAllIds).
     pub fn enabled_ids(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if self.three_state_enable == Some(true) {
-            out.push(self.id.clone());
-        }
-        for c in &self.items {
-            out.extend(c.enabled_ids());
+        if self.items.is_empty() {
+            if self.three_state_enable == Some(true) {
+                out.push(self.id.clone());
+            }
+        } else {
+            for c in &self.items {
+                out.extend(c.enabled_ids());
+            }
         }
         out
     }
 
-    /// Restore three-state from a set of enabled IDs.
+    /// Restore three-state from a set of persisted (leaf) IDs.
+    ///
+    /// Children are restored first and a container's own state is then derived
+    /// from them, so an expanded subtree keeps a consistent three-state value.
     pub fn restore_enable(&mut self, enabled: &std::collections::HashSet<String>) {
         if self.items.is_empty() {
             self.three_state_enable = Some(enabled.contains(&self.id));
@@ -189,6 +200,16 @@ impl AccelerateProject {
             for c in self.items.iter_mut() {
                 c.restore_enable(enabled);
             }
+            // Derive the container state from its children.
+            let leaves = self.all_leaves();
+            let on = leaves.iter().filter(|l| l.three_state_enable == Some(true)).count();
+            self.three_state_enable = if on == 0 {
+                Some(false)
+            } else if on == leaves.len() {
+                Some(true)
+            } else {
+                None // indeterminate
+            };
         }
     }
 }

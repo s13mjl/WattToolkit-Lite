@@ -9,7 +9,7 @@ WattToolkit-Lite 是一个使用 Rust 重写 [WattToolkit (Steam++)](https://git
   - 四种加速模式：**Hosts 文件**（默认）、**DNS 拦截**（WinDivert）、**PAC 代理**、**系统代理**
   - 本地反向代理：Hosts 模式下监听 443 端口，MITM 解密后转发到真实上游（按 SNI 动态签发叶子证书）
   - 系统代理 / PAC 模式：正向代理（CONNECT 隧道 + 绝对 URI 转发），加速域名按自定义 DNS/DoH 解析
-  - 内置 Steam 商店 / 社区 / 客户端 / 创意工坊加速项目（离线内置数据，优先读取本地缓存 LOCAL_ACCELERATE）
+  - 内置 14 个加速平台（离线内置数据，优先读取本地缓存 LOCAL_ACCELERATE）：Steam 服务、Steam 头像修复、Twitch 直播、GitHub、Discord、Epic、Ubisoft、Origin、Spotify、Microsoft、Apple、AMD、Riot Games、Google
 - **证书管理**：生成 / 安装 / 删除 / 查看本地根证书（WattToolkit-Lite Certificate，有效期 300 天）
 - **Hosts 管理**：编辑 / 重置 / 打开，使用独立的 WattToolkit-Lite 标记块，不与原程序冲突
 - **网络检测**：NAT、DoH 延迟（阿里云 / DNSPod / Google）、IPv6、默认域名连接测试（绿/橙/红 三级）
@@ -27,7 +27,7 @@ WattToolkit-Lite 是一个使用 Rust 重写 [WattToolkit (Steam++)](https://git
 | 平台 | 仅 Windows |
 | 根证书密钥 | ECDSA P-256（原为 RSA 2048；浏览器同样信任） |
 | HTTP 版本 | HTTP/1.1（未复现 HTTP/2/3） |
-| 加速项目数据 | 内置 Steam 商店/社区/客户端/创意工坊 4 组（原为服务器 API + 登录；本版本无登录，离线内置，支持本地缓存 LOCAL_ACCELERATE.json） |
+| 加速项目数据 | 内置 14 个加速平台（原为服务器 API + 登录；本版本无登录，离线内置，支持本地缓存 LOCAL_ACCELERATE.json），平台清单/域名对齐原项目本地缓存数据 |
 | DNS 拦截驱动 | 缺失 WinDivert 时该模式提示不可用，其余三种模式正常（优雅降级） |
 
 ## 构建
