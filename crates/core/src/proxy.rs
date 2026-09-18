@@ -189,6 +189,13 @@ impl ProxyManager {
                 }
             }
         }
+        // Forward targets are connect aliases, not intercept entries: they
+        // must resolve to their real IPs for the MITM upstream, so keep them
+        // out of the interception set (otherwise the hook would answer them
+        // with 127.0.0.1 and the proxy would connect to itself).
+        for target in forward.values() {
+            domains.remove(target);
+        }
         *g.domains.write().unwrap() = domains.clone();
         *g.forward.write().unwrap() = forward.clone();
         *g.config.write().unwrap() = settings.clone();
@@ -213,6 +220,9 @@ impl ProxyManager {
         let domains_arc = g.domains.clone();
         let forward_arc = g.forward.clone();
         let cert = self.cert.clone();
+        // Root cert is needed by the MITM path (Hosts + DnsIntercept modes).
+        let root_for_mitm = cert.root().ok();
+
 
         g.running = true;
         g.mode = Some(mode);
@@ -236,6 +246,7 @@ impl ProxyManager {
                     stats: stats.clone(),
                     log_tx: log_tx.clone(),
                     forward: forward_arc.clone(),
+                    domains: domains_arc.clone(),
                 })
             })
         };
@@ -279,6 +290,7 @@ impl ProxyManager {
                     stats: stats.clone(),
                     log_tx: log_tx.clone(),
                     forward: forward_arc.clone(),
+                    domains: domains_arc.clone(),
                 };
                 let task = tokio::spawn(async move {
                     let _ = run_mitm_on(mitm_listener, rt).await;
@@ -377,29 +389,66 @@ impl ProxyManager {
                 g.tasks.push(task);
             }
             ProxyMode::DnsIntercept => {
-                // Start the forward proxy to receive redirected traffic.
-                let ip: IpAddr = "0.0.0.0".parse().unwrap();
-                let bind: SocketAddr = (ip, settings.system_proxy_port).into();
-                let listener = match tokio::net::TcpListener::bind(bind).await {
+                // DNS interception steers accelerated domains to 127.0.0.1, so a
+                // MITM listener on 443 is required to handle that traffic
+                // (mirrors the original, which starts both a MITM and a forward
+                // proxy in DNSIntercept mode).
+                let mitm_bind: SocketAddr = (IpAddr::from([127, 0, 0, 1]), 443u16).into();
+                let mitm_listener = match tokio::net::TcpListener::bind(mitm_bind).await {
                     Ok(l) => l,
                     Err(e) => {
                         self.stop_inner();
                         return Err(format!(
-                            "端口 {} 被占用或无法绑定，请检查是否已有其他程序在监听: {e}",
+                            "端口 443 被占用或无法绑定（可能需要管理员权限）: {e}"
+                        ));
+                    }
+                };
+                // Forward proxy on the configured port for non-accelerated HTTP.
+                let ip: IpAddr = "0.0.0.0".parse().unwrap();
+                let fwd_bind: SocketAddr = (ip, settings.system_proxy_port).into();
+                let fwd_listener = match tokio::net::TcpListener::bind(fwd_bind).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.stop_inner();
+                        return Err(format!(
+                            "端口 {} 被占用或无法绑定: {e}",
                             settings.system_proxy_port
                         ));
                     }
                 };
-                let rt = FwdRuntime {
-                    config: config.clone(),
+                // The interceptor owns UDP:53, so the MITM's own upstream lookup
+                // must go through DoH — a plain UDP query would be intercepted back
+                // to 127.0.0.1 and the proxy would connect to itself.
+                let mut intercept_cfg = config.read().unwrap().clone();
+                intercept_cfg.use_doh = true;
+                let intercept_cfg = Arc::new(RwLock::new(intercept_cfg));
+                let rt = MitmRuntime {
+                    cm: cert.clone(),
+                    cache: Arc::new(crate::cert::LeafCache::default()),
+                    root: root_for_mitm.clone().unwrap_or_else(|| Arc::new(crate::cert::RootCertificate {
+                        der: Vec::new(),
+                        key_pkcs8: Vec::new(),
+                        not_after: std::time::SystemTime::UNIX_EPOCH,
+                    })),
+                    config: intercept_cfg.clone(),
+                    stats: stats.clone(),
+                    log_tx: log_tx.clone(),
+                    forward: forward_arc.clone(),
+                    domains: domains_arc.clone(),
+                };
+                let fwd_rt = FwdRuntime {
+                    config: intercept_cfg,
                     domains: domains_arc.clone(),
                     stats: stats.clone(),
                     log_tx: log_tx.clone(),
                     mitm: mitm_rt.clone(),
                     forward: forward_arc.clone(),
                 };
-                let task = tokio::spawn(async move {
-                    let _ = run_forward_proxy_on(listener, rt).await;
+                let task_mitm = tokio::spawn(async move {
+                    let _ = run_mitm_on(mitm_listener, rt).await;
+                });
+                let task_fwd = tokio::spawn(async move {
+                    let _ = run_forward_proxy_on(fwd_listener, fwd_rt).await;
                 });
                 // Start the WinDivert DNS interceptor on a blocking thread.
                 let wd = Arc::new(DnsInterceptRuntime::new(
@@ -412,7 +461,8 @@ impl ProxyManager {
                     move || wd.run()
                 });
                 let mut g = self.inner.lock().unwrap();
-                g.tasks.push(task);
+                g.tasks.push(task_mitm);
+                g.tasks.push(task_fwd);
                 g.windivert_stop = Some(stop_flag);
             }
         }

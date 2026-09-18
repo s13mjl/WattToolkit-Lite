@@ -375,16 +375,14 @@ async fn race_connect(
 /// reachable one) - the original streams all endpoints and keeps the first that
 /// connects.
 pub async fn connect_upstream(host: &str, port: u16, ips: &[std::net::IpAddr]) -> Option<TcpStream> {
-    let mut candidates: Vec<std::net::SocketAddr> = ips
+    // Do NOT call the system resolver here: in DNS-interception mode a lookup for
+    // an accelerated host is answered 127.0.0.1 by our own hook, and 127.0.0.1 is
+    // the fastest to connect (localhost) - the proxy would race-connect to its own
+    // 443 listener and the TLS handshake fails. `host` is kept only for logging.
+    let _ = host;
+    let candidates: Vec<std::net::SocketAddr> = ips
         .iter()
         .map(|ip| std::net::SocketAddr::new(*ip, port))
         .collect();
-    if let Ok(addrs) = tokio::net::lookup_host((host, port)).await {
-        for a in addrs {
-            if !candidates.contains(&a) {
-                candidates.push(a);
-            }
-        }
-    }
     race_connect(&candidates, CONNECT_TIMEOUT).await
 }

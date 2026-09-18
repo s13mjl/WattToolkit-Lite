@@ -80,6 +80,10 @@ pub struct MitmRuntime {
     pub config: Arc<RwLock<ProxySettings>>,
     pub stats: Arc<Mutex<crate::proxy::FlowStats>>,
     pub log_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Intercept set (listen domains). Upstream hosts NOT in this set may be
+    /// resolved via the system resolver when DoH fails (they are not answered
+    /// with 127.0.0.1, so no self-connect loop).
+    pub domains: Arc<RwLock<std::collections::HashSet<String>>>,
     /// Host -> alternate hostname to dial upstream (mirrors the original
     /// `ForwardDestination`: the request keeps its original Host header while
     /// the TCP/TLS connection targets a different, reachable name).
@@ -218,13 +222,36 @@ async fn forward_one<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     // Resolve and dial `connect_host`, but keep `host` for the Host header.
     // A blocked domain resolves to poisoned IPs, while its CDN alias resolves
     // correctly and accepts the handshake only when SNI matches the alias.
-    let ips = dns::resolve_a(
+    let mut ips = dns::resolve_a(
         connect_host,
         &cfg.proxy_master_dns,
         cfg.use_doh,
         &cfg.custom_doh_address,
     )
     .await;
+    // DoH unreachable (common in CN): try plain UDP against the system DNS
+    // servers with our fixed source port — the interceptor filter exempts
+    // `udp.SrcPort == 53453`, so even intercepted hosts resolve to real IPs
+    // (a random source port would be answered 127.0.0.1 and loop to ourselves).
+    if ips.is_empty() {
+        for srv in dns::system_dns_servers() {
+            ips = dns::resolve_udp(connect_host, Some(srv)).await;
+            if !ips.is_empty() {
+                rt.send_log(format!("[MITM] DoH failed, UDP {srv} (fixed src port) -> {connect_host}: {ips:?}"));
+                break;
+            }
+        }
+    }
+    // Then DNS-over-TCP (TCP:53 is not matched by the interceptor either).
+    if ips.is_empty() {
+        for srv in dns::tcp_dns_servers(&cfg.proxy_master_dns) {
+            ips = dns::resolve_tcp(connect_host, srv).await;
+            if !ips.is_empty() {
+                rt.send_log(format!("[MITM] DoH failed, TCP DNS {srv} -> {connect_host}: {ips:?}"));
+                break;
+            }
+        }
+    }
     let upstream = match http1::connect_upstream(connect_host, port, &ips).await {
         Some(s) => s,
         None => {

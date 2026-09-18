@@ -5,7 +5,39 @@
 
 use serde_json::Value;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// Read the DNS servers currently configured on every network adapter
+/// (HKLM\...\Tcpip\Parameters\Interfaces\<guid>\{NameServer, DhcpNameServer}).
+pub fn system_dns_servers() -> Vec<IpAddr> {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+    let mut out: Vec<IpAddr> = Vec::new();
+    let ifaces = match RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(
+        r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces",
+    ) {
+        Ok(k) => k,
+        Err(_) => return out,
+    };
+    for name in ifaces.enum_keys().filter_map(|r| r.ok()) {
+        if let Ok(sub) = ifaces.open_subkey(&name) {
+            for val in ["NameServer", "DhcpNameServer"] {
+                if let Ok(s) = sub.get_value::<String, _>(val) {
+                    for part in s.split(|c: char| c == ',' || c == ' ' || c == ';') {
+                        if let Ok(ip) = part.trim().parse::<IpAddr>() {
+                            if !out.contains(&ip) {
+                                out.push(ip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
 
 /// Public DNS constants (copied from original IDnsAnalysisService.Constants).
 pub mod dns_const {
@@ -75,23 +107,21 @@ pub fn dns_servers() -> Vec<&'static str> {
 /// domain instead would misjudge the whole DoH set whenever that one name
 /// happens to fail (the original resolves the actual host too).
 pub async fn resolve_a(host: &str, dns: &str, use_doh: bool, doh_address: &str) -> Vec<IpAddr> {
-    let mut out = Vec::new();
+    // The original picks DoH *or* the system resolver (DnsAnalysisServiceSwitchImpl),
+    // never both. Falling back from DoH to a plain UDP query would be intercepted
+    // by our own WinDivert hook in DnsIntercept mode (127.0.0.1 -> self-connect).
     if use_doh {
         if !doh_address.is_empty() {
-            out = resolve_doh(host, doh_address).await;
-        } else {
-            out = race_doh(host).await;
+            return resolve_doh(host, doh_address).await;
         }
+        return race_doh(host).await;
     }
-    if out.is_empty() {
-        let server: Option<IpAddr> = dns
-            .trim()
-            .parse::<IpAddr>()
-            .ok()
-            .filter(|_| dns.trim() != "System Default");
-        out = resolve_udp(host, server).await;
-    }
-    out
+    let server: Option<IpAddr> = dns
+        .trim()
+        .parse::<IpAddr>()
+        .ok()
+        .filter(|_| dns.trim() != "System Default");
+    resolve_udp(host, server).await
 }
 
 /// Race every known DoH endpoint against `host` and take the first non-empty
@@ -110,6 +140,36 @@ async fn race_doh(host: &str) -> Vec<IpAddr> {
         }
     }
     Vec::new()
+}
+
+/// DNS servers tried for TCP fallback, in order:
+/// 1. the system's current DNS servers (always reachable on this LAN)
+/// 2. the configured server (if it's a literal IP)
+/// 3. well-known CN-friendly public resolvers
+pub fn tcp_dns_servers(configured: &str) -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = Vec::new();
+    for ip in system_dns_servers() {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    if let Ok(ip) = configured.trim().parse() {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    for s in [
+        dns_const::PRIMARY_ALI,
+        dns_const::PRIMARY_DNSPOD,
+        dns_const::PRIMARY_114,
+    ] {
+        if let Ok(ip) = s.parse() {
+            if !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+    }
+    out
 }
 
 /// Resolve via DNS-over-HTTPS (JSON API), mirroring DnsDohAnalysisService.
@@ -184,28 +244,60 @@ pub async fn resolve_udp(host: &str, server: Option<IpAddr>) -> Vec<IpAddr> {
 }
 
 /// Minimal DNS A-record query over UDP.
+/// Source port used by our own DNS queries. The WinDivert interceptor filter
+/// excludes this port (`udp.SrcPort != 53453`), so our own lookups bypass the
+/// hook even for intercepted domains (UDP would otherwise be answered with
+/// 127.0.0.1 and the proxy would connect to itself). Mirrors how the original
+/// analysis service talks to its DNS servers directly.
+pub const OURS_DNS_SRC_PORT: u16 = 53453;
+
+/// One shared socket bound to the fixed source port. All queries reuse it so the
+/// WinDivert filter (which exempts `udp.SrcPort == 53453`) lets our packets pass
+/// even for intercepted domains. A single socket avoids "address in use" under
+/// concurrency; each query gets a unique ID so responses cannot cross-talk.
+static DNS_SOCK: OnceLock<std::net::UdpSocket> = OnceLock::new();
+static DNS_ID: AtomicU16 = AtomicU16::new(0x1234);
+
 fn dns_query_a(host: &str, server: IpAddr) -> Result<Vec<IpAddr>, String> {
-    use std::net::UdpSocket;
+    let mut buf = [0u8; 4096];
+    let id = DNS_ID.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let packet = build_a_query_with_id(host, id, &mut buf)?;
 
-    let mut buf = [0u8; 512];
-    let packet = build_a_query(host, &mut buf)?;
-
-    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    sock.set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(|e| e.to_string())?;
+    let sock = DNS_SOCK.get_or_init(|| {
+        let s = std::net::UdpSocket::bind(("0.0.0.0".to_string(), OURS_DNS_SRC_PORT))
+            .unwrap_or_else(|_| std::net::UdpSocket::bind("0.0.0.0:0").expect("bind dns sock"));
+        let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+        s
+    });
     let target = match server {
         IpAddr::V4(v4) => std::net::SocketAddr::new(std::net::IpAddr::V4(v4), 53),
         IpAddr::V6(v6) => std::net::SocketAddr::new(std::net::IpAddr::V6(v6), 53),
     };
-    sock.send_to(packet, target).map_err(|e| e.to_string())?;
-    let (n, _) = sock.recv_from(&mut buf).map_err(|e| e.to_string())?;
-    parse_a_response(&buf[..n])
+    let id_bytes = id.to_be_bytes();
+    // Send with retry: bind errors on the first attempt mean the source port is
+    // taken by another process; our fallback bind used :0 so we are fine.
+    sock.send_to(&packet, target).map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("dns timeout".into());
+        }
+        match sock.recv_from(&mut buf) {
+            Ok((n, _)) => {
+                // Only accept a response whose ID matches this query.
+                if n >= 2 && buf[0] == id_bytes[0] && buf[1] == id_bytes[1] {
+                    return parse_a_response(&buf[..n]);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
 }
 
 /// Build a DNS A query packet.
-fn build_a_query<'a>(host: &str, buf: &'a mut [u8]) -> Result<&'a [u8], String> {
+fn build_a_query_with_id<'a>(host: &str, id: u16, buf: &'a mut [u8]) -> Result<&'a [u8], String> {
     let mut w = 0usize;
-    let id: u16 = 0x1234;
     buf[w] = (id >> 8) as u8; w += 1;
     buf[w] = (id & 0xff) as u8; w += 1;
     buf[w] = 0x01; w += 1; // RD
@@ -227,6 +319,49 @@ fn build_a_query<'a>(host: &str, buf: &'a mut [u8]) -> Result<&'a [u8], String> 
     buf[w] = 0x00; w += 1; buf[w] = 0x01; w += 1; // QTYPE=A
     buf[w] = 0x00; w += 1; buf[w] = 0x01; w += 1; // QCLASS=IN
     Ok(&buf[..w])
+}
+
+/// Resolve via DNS-over-TCP (port 53). TCP is NOT matched by the WinDivert
+/// `udp.DstPort == 53` interceptor, so this works even for intercepted domains
+/// (the UDP path would be answered with 127.0.0.1 and loop back to ourselves).
+/// Mirrors DnsClient's TCP-mode support used by the original DnsAnalysisService.
+pub async fn resolve_tcp(host: &str, server: IpAddr) -> Vec<IpAddr> {
+    let host = host.to_string();
+    tokio::task::spawn_blocking(move || -> Vec<IpAddr> {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let mut buf = [0u8; 512];
+        let q = match build_a_query_with_id(&host, 0x2222, &mut buf) {
+            Ok(q) => q.to_vec(),
+            Err(_) => return Vec::new(),
+        };
+        let mut sock = match TcpStream::connect((server, 53)) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let _ = sock.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut pkt = Vec::with_capacity(q.len() + 2);
+        pkt.extend_from_slice(&(q.len() as u16).to_be_bytes());
+        pkt.extend_from_slice(&q);
+        if sock.write_all(&pkt).is_err() {
+            return Vec::new();
+        }
+        let mut lenb = [0u8; 2];
+        if sock.read_exact(&mut lenb).is_err() {
+            return Vec::new();
+        }
+        let rlen = u16::from_be_bytes(lenb) as usize;
+        if rlen == 0 || rlen > 512 {
+            return Vec::new();
+        }
+        let mut resp = vec![0u8; rlen];
+        if sock.read_exact(&mut resp).is_err() {
+            return Vec::new();
+        }
+        parse_a_response(&resp).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Parse A records from a DNS response.
