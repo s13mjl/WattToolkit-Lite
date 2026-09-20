@@ -156,6 +156,11 @@ impl ProxyManager {
                     if leaf.three_state_enable == Some(true) {
                         for d in leaf.listen_domain_names.split(';') {
                             let d = d.trim().to_lowercase();
+                            // `*.example.com` matches the bare domain and every
+                            // subdomain: strip the wildcard so the matcher's
+                            // `ends_with(".<domain>")` rule covers both (official
+                            // data uses `*.st.dl.eccdnx.com`, `*.steamcommunity.com`).
+                            let d = d.strip_prefix("*.").unwrap_or(&d).to_string();
                             if !d.is_empty() {
                                 domains.insert(d);
                             }

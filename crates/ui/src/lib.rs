@@ -2,6 +2,8 @@
 //! MainFramePage + SettingsPage + AcceleratorPage2 structure.
 
 mod pages;
+#[cfg(windows)]
+pub mod win32;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -32,6 +34,23 @@ pub fn set_tray_state(t: Arc<Mutex<TrayState>>) {
     let _ = TRAY_STATE.set(t);
 }
 
+/// The running ProxyManager, kept here so the tray thread can stop the proxy
+/// before exiting (the UI loop is not guaranteed to run while hidden).
+static EXIT_PROXY: std::sync::OnceLock<ProxyManager> = std::sync::OnceLock::new();
+
+/// Register the proxy manager used by [`shutdown`].
+pub fn set_exit_proxy(p: ProxyManager) {
+    let _ = EXIT_PROXY.set(p);
+}
+
+/// Stop the proxy and quit - the tray menu's 退出 action.
+pub fn shutdown() -> ! {
+    if let Some(p) = EXIT_PROXY.get() {
+        p.stop();
+    }
+    std::process::exit(0);
+}
+
 
 
 /// Main application.
@@ -50,6 +69,14 @@ pub struct App {
     pub accel_loaded: bool,
     /// Window/about icon texture (loaded once from APP_ICON).
     pub icon: Option<egui::TextureHandle>,
+    /// True while the window is hidden in the tray (the X button hides instead
+    /// of exiting; the tray menu's 退出 is what really quits).
+    pub hidden_to_tray: bool,
+    /// Set once the Win32 HWND has been captured for direct show/hide control.
+    pub hwnd_known: bool,
+    /// Frame counter + last heartbeat time (diagnostics for the tray loop).
+    pub frames: u64,
+    pub last_beat: Option<Instant>,
 }
 
 /// Proxy settings dialog state (mirrors ProxySettingsWindow).
@@ -139,6 +166,8 @@ impl App {
         // Attach the proxy log receiver; without this every internal proxy log
         // line (listener start, CONNECT tunnels, errors) is silently dropped.
         let log_rx = proxy.take_log_rx();
+        // Let the tray thread stop the proxy when it exits the app.
+        set_exit_proxy(proxy.clone());
 
         let icon = pages::settings_page::APP_ICON
             .clone()
@@ -156,6 +185,10 @@ impl App {
             toast: None,
             accel_loaded: false,
             icon,
+            hidden_to_tray: false,
+            hwnd_known: false,
+            frames: 0,
+            last_beat: None,
         };
         // Load acceleration projects (local cache or built-in) and restore the
         // enabled state: on first run nothing is checked by default; on later
@@ -211,20 +244,33 @@ impl App {
             match tray_icon::TrayIconEvent::receiver().try_recv() {
                 Ok(tray_icon::TrayIconEvent::Click { button, .. }) => {
                     if button == tray_icon::MouseButton::Left {
+                        log::info!("[tray] left click -> show window");
                         t.show_window = true;
                     }
                 }
-                Ok(_) => {}
+                // Windows-only: double click also restores the window.
+                Ok(tray_icon::TrayIconEvent::DoubleClick { button, .. }) => {
+                    if button == tray_icon::MouseButton::Left {
+                        log::info!("[tray] double click -> show window");
+                        t.show_window = true;
+                    }
+                }
+                Ok(other) => {
+                    log::debug!("[tray] event: {other:?}");
+                }
                 Err(_) => break,
             }
         }
         loop {
             match tray_icon::menu::MenuEvent::receiver().try_recv() {
-                Ok(ev) => match ev.id.as_ref() {
-                    "show" => t.show_window = true,
-                    "exit" => t.exit = true,
-                    _ => {}
-                },
+                Ok(ev) => {
+                    log::info!("[tray] menu event: {}", ev.id.as_ref());
+                    match ev.id.as_ref() {
+                        "show" => t.show_window = true,
+                        "exit" => t.exit = true,
+                        _ => {}
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -233,6 +279,23 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Heartbeat: proves the render loop keeps running while hidden (the tray
+        // channels can only be drained from here).
+        self.frames = self.frames.wrapping_add(1);
+        if self.last_beat.map_or(true, |t| t.elapsed() > Duration::from_secs(2)) {
+            self.last_beat = Some(Instant::now());
+            log::info!(
+                "[beat] frames={} hidden={} window_visible={}",
+                self.frames,
+                self.hidden_to_tray,
+                {
+                    #[cfg(windows)]
+                    { win32::is_visible() }
+                    #[cfg(not(windows))]
+                    { true }
+                }
+            );
+        }
         // Surface any proxy start failure reported by the background thread.
         if let Some(err) = pages::accelerator::START_ERROR.lock().unwrap().take() {
             self.push_log(format!("[ERROR] 启动加速失败: {err}"));
@@ -250,14 +313,67 @@ impl eframe::App for App {
         }
         // Tray events.
         self.poll_tray_events();
+        // Clicking the window's X hides to the tray instead of quitting; the
+        // tray menu's 退出 is the only way out (mirrors the original client,
+        // which keeps accelerating in the background).
+        // Remember the HWND once so we can drive ShowWindow directly (the
+        // egui ViewportCommand path could hide but never restore the window).
+        #[cfg(windows)]
+        if !self.hwnd_known {
+            use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+            if let Ok(h) = _frame.window_handle() {
+                if let RawWindowHandle::Win32(w) = h.as_raw() {
+                    win32::remember(w.hwnd.get() as usize);
+                    self.hwnd_known = true;
+                    log::info!("[tray] captured hwnd={}", w.hwnd.get());
+                }
+            }
+        }
+        // X button -> hide to the tray; the process keeps accelerating. The close
+        // is always cancelled here (only the tray menu's 退出 may really exit).
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            #[cfg(windows)]
+            {
+                win32::hide();
+            }
+            #[cfg(not(windows))]
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            // No toast here: the window is gone the moment we hide it, so a
+            // message rendered into it would never be seen.
+            self.hidden_to_tray = true;
+        } else if self.hidden_to_tray {
+            // The window was restored from the tray (the loader's tray thread
+            // drives Win32 directly). Clear the flag so the next X hides again.
+            #[cfg(windows)]
+            let visible = win32::is_visible();
+            #[cfg(not(windows))]
+            let visible = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+            if visible {
+                self.hidden_to_tray = false;
+            }
+        }
         {
             let mut t = self.tray.lock().unwrap();
             if t.show_window {
                 t.show_window = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.hidden_to_tray = false;
+                #[cfg(windows)]
+                {
+                    let ok = win32::show();
+                    log::info!("[tray] restore window -> visible={ok}");
+                }
+                #[cfg(not(windows))]
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
             }
             if t.exit {
+                self.hidden_to_tray = false;
                 self.proxy.stop();
                 std::process::exit(0);
             }

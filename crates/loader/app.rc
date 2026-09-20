@@ -1,0 +1,35 @@
+// Windows resource script: application icon + version metadata.
+// The icon is the project icon (assets/accelerator.ico).
+
+#include <winresrc.h>
+
+1 ICON "../../assets/wattoolkit-lite.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "WattToolkit-Lite"
+            VALUE "FileDescription", "WattToolkit-Lite"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "wattoolkit-lite"
+            VALUE "LegalCopyright", "GPL-3.0"
+            VALUE "OriginalFilename", "wattoolkit-lite.exe"
+            VALUE "ProductName", "WattToolkit-Lite"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

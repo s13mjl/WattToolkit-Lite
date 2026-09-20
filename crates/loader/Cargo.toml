@@ -14,3 +14,7 @@ log = "0.4.34"
 tray-icon = "0.24.2"
 wtlite-core = { path = "../core" }
 wtlite-ui = { path = "../ui" }
+
+[build-dependencies]
+# Embeds the .ico (and version info) into the exe so Explorer/taskbar show the icon.
+embed-resource = "3.0.11"

@@ -3,3 +3,13 @@ WinDivert.dll
 WinDivert*.sys
 WinDivert*.lib
 WinDivert*.h
+
+# Scratch scripts used while debugging (never part of the source tree)
+/_*.ps1
+/_*.cmd
+/_*.mjs
+/_*.py
+
+# Build output
+/target
+
