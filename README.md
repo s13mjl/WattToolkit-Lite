@@ -3,6 +3,17 @@
 WattToolkit-Lite 是一个使用 Rust 重写 [WattToolkit (Steam++)](https://github.com/BeyondDimension/SteamTools)
 **网络加速** 与 **设置** 功能的二次开发项目，仅支持 Windows。
 
+## 下载
+
+从 [Releases](https://github.com/s13mjl/WattToolkit-Lite/releases) 下载最新版本：
+
+| 文件 | 说明 |
+|---|---|
+| `WattToolkit-Lite-<版本>-win-x64.zip` | **推荐**：主程序 + WinDivert 运行时（DNS 拦截模式需要），解压即用 |
+| `wattoolkit-lite.exe` | 仅主程序（若已有 WinDivert.dll 时可单独下载） |
+
+> 仓库不再跟踪编译产物，`dist/` 已加入 `.gitignore`。
+
 ## 功能
 
 - **网络加速**（复现原项目逻辑）
