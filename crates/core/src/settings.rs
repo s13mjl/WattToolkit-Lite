@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralSettings {
-    pub auto_check_app_update: bool,
     pub auto_run_on_startup: bool,
     pub minimize_on_startup: bool,
     pub tray_icon: bool,
@@ -18,7 +17,6 @@ pub struct GeneralSettings {
 impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
-            auto_check_app_update: true,
             auto_run_on_startup: false,
             minimize_on_startup: false,
             tray_icon: true,

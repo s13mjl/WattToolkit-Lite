@@ -65,7 +65,6 @@ fn general_tab(app: &mut App, ui: &mut egui::Ui) {
     let mut ar_changed = false;
     {
         let g = &mut app.settings.general;
-        ui.checkbox(&mut g.auto_check_app_update, "启动时自动检查更新");
         let mut ar = g.auto_run_on_startup;
         if ui.checkbox(&mut ar, "开机自动启动").changed() {
             g.auto_run_on_startup = ar;
