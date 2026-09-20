@@ -13,3 +13,7 @@ WinDivert*.h
 # Build output
 /target
 
+# Packaged binaries: published through GitHub Releases, not through git.
+# Committing a ~20 MB exe on every rebuild bloats the repository history.
+/dist
+
