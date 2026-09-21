@@ -107,21 +107,58 @@ pub fn dns_servers() -> Vec<&'static str> {
 /// domain instead would misjudge the whole DoH set whenever that one name
 /// happens to fail (the original resolves the actual host too).
 pub async fn resolve_a(host: &str, dns: &str, use_doh: bool, doh_address: &str) -> Vec<IpAddr> {
-    // The original picks DoH *or* the system resolver (DnsAnalysisServiceSwitchImpl),
-    // never both. Falling back from DoH to a plain UDP query would be intercepted
-    // by our own WinDivert hook in DnsIntercept mode (127.0.0.1 -> self-connect).
-    if use_doh {
-        if !doh_address.is_empty() {
-            return resolve_doh(host, doh_address).await;
-        }
-        return race_doh(host).await;
-    }
-    let server: Option<IpAddr> = dns
+    let configured: Option<IpAddr> = dns
         .trim()
         .parse::<IpAddr>()
         .ok()
         .filter(|_| dns.trim() != "System Default");
-    resolve_udp(host, server).await
+    if use_doh {
+        let ips = if !doh_address.is_empty() {
+            resolve_doh(host, doh_address).await
+        } else {
+            race_doh(host).await
+        };
+        if !ips.is_empty() {
+            return ips;
+        }
+        log::warn!("[dns] DoH failed for {host} (configured={configured:?}) -> trying plain DNS");
+        // DoH endpoints unreachable (blocked / timeout in CN): fall through to
+        // plain DNS instead of giving up. This is safe even for intercepted
+        // hosts because our lookups bind OURS_DNS_SRC_PORT, which the WinDivert
+        // filter exempts - a random source port would be answered 127.0.0.1 and
+        // the proxy would connect to itself.
+        if let Some(ips) = plain_lookup(host, configured).await {
+            return ips;
+        }
+        return Vec::new();
+    }
+    if let Some(ips) = plain_lookup(host, configured).await {
+        return ips;
+    }
+    resolve_udp(host, None).await
+}
+
+/// Plain-DNS lookup that always uses the exempted fixed source port: the
+/// configured resolver first, then the machine's own DNS servers.
+async fn plain_lookup(host: &str, configured: Option<IpAddr>) -> Option<Vec<IpAddr>> {
+    if let Some(srv) = configured {
+        let ips = resolve_udp(host, Some(srv)).await;
+        log::warn!("[dns] plain lookup {host} via configured {srv} -> {ips:?}");
+        if !ips.is_empty() {
+            return Some(ips);
+        }
+    }
+    for srv in system_dns_servers() {
+        if Some(srv) == configured {
+            continue;
+        }
+        let ips = resolve_udp(host, Some(srv)).await;
+        log::warn!("[dns] plain lookup {host} via system {srv} -> {ips:?}");
+        if !ips.is_empty() {
+            return Some(ips);
+        }
+    }
+    None
 }
 
 /// Race every known DoH endpoint against `host` and take the first non-empty

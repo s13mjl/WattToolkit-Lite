@@ -222,6 +222,7 @@ async fn forward_one<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     // Resolve and dial `connect_host`, but keep `host` for the Host header.
     // A blocked domain resolves to poisoned IPs, while its CDN alias resolves
     // correctly and accepts the handshake only when SNI matches the alias.
+    // resolve_a already falls back from DoH to plain DNS internally.
     let mut ips = dns::resolve_a(
         connect_host,
         &cfg.proxy_master_dns,
@@ -229,25 +230,12 @@ async fn forward_one<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &cfg.custom_doh_address,
     )
     .await;
-    // DoH unreachable (common in CN): try plain UDP against the system DNS
-    // servers with our fixed source port — the interceptor filter exempts
-    // `udp.SrcPort == 53453`, so even intercepted hosts resolve to real IPs
-    // (a random source port would be answered 127.0.0.1 and loop to ourselves).
-    if ips.is_empty() {
-        for srv in dns::system_dns_servers() {
-            ips = dns::resolve_udp(connect_host, Some(srv)).await;
-            if !ips.is_empty() {
-                rt.send_log(format!("[MITM] DoH failed, UDP {srv} (fixed src port) -> {connect_host}: {ips:?}"));
-                break;
-            }
-        }
-    }
-    // Then DNS-over-TCP (TCP:53 is not matched by the interceptor either).
+    // Last resort: DNS-over-TCP (TCP:53 is not matched by the UDP interceptor).
     if ips.is_empty() {
         for srv in dns::tcp_dns_servers(&cfg.proxy_master_dns) {
             ips = dns::resolve_tcp(connect_host, srv).await;
             if !ips.is_empty() {
-                rt.send_log(format!("[MITM] DoH failed, TCP DNS {srv} -> {connect_host}: {ips:?}"));
+                rt.send_log(format!("[MITM] TCP DNS {srv} -> {connect_host}: {ips:?}"));
                 break;
             }
         }
