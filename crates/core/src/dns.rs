@@ -4,6 +4,8 @@
 //! picks the strategy based on proxy mode (mirrors DnsAnalysisServiceSwitchImpl).
 
 use serde_json::Value;
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
@@ -290,37 +292,52 @@ pub async fn resolve_udp(host: &str, server: Option<IpAddr>) -> Vec<IpAddr> {
 /// analysis service talks to its DNS servers directly.
 pub const OURS_DNS_SRC_PORT: u16 = 53453;
 
-/// One shared socket bound to the fixed source port. All queries reuse it so the
-/// WinDivert filter (which exempts `udp.SrcPort == 53453`) lets our packets pass
-/// even for intercepted domains. A single socket avoids "address in use" under
-/// concurrency; each query gets a unique ID so responses cannot cross-talk.
-static DNS_SOCK: OnceLock<std::net::UdpSocket> = OnceLock::new();
 static DNS_ID: AtomicU16 = AtomicU16::new(0x1234);
-/// Serializes send+recv on the shared socket: without this, concurrent queries
-/// race on recv_from and steal each other's responses (verified: 4 concurrent
-/// queries → only 1 succeeds). UDP round-trips are <100ms so the lock is cheap.
-static DNS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[link(name = "ws2_32")]
+extern "system" {
+    fn setsockopt(
+        s: usize,
+        level: i32,
+        name: i32,
+        val: *const i32,
+        len: i32,
+    ) -> i32;
+}
+const SO_REUSEADDR: i32 = 0x0004;
+const SOL_SOCKET: i32 = 0xFFFF;
 
 fn dns_query_a(host: &str, server: IpAddr) -> Result<Vec<IpAddr>, String> {
-    let _guard = DNS_LOCK.lock().unwrap();
+    // Per-query socket: no shared state, no Mutex, full concurrency. Each query
+    // gets its own socket so responses can never be cross-stolen. Try to bind
+    // OURS_DNS_SRC_PORT with SO_REUSEADDR (lets multiple sockets share the port
+    // for the WinDivert exemption); fall back to an ephemeral port.
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind(("0.0.0.0", OURS_DNS_SRC_PORT))
+        .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+        .map_err(|e| e.to_string())?;
+    // Enable SO_REUSEADDR so concurrent queries can all use port 53453.
+    unsafe {
+        let val: i32 = 1;
+        setsockopt(
+            sock.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &val,
+            std::mem::size_of::<i32>() as i32,
+        );
+    }
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(1500)));
+
     let mut buf = [0u8; 4096];
     let id = DNS_ID.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     let packet = build_a_query_with_id(host, id, &mut buf)?;
-
-    let sock = DNS_SOCK.get_or_init(|| {
-        let s = std::net::UdpSocket::bind(("0.0.0.0".to_string(), OURS_DNS_SRC_PORT))
-            .unwrap_or_else(|_| std::net::UdpSocket::bind("0.0.0.0:0").expect("bind dns sock"));
-        let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
-        s
-    });
     let target = match server {
         IpAddr::V4(v4) => std::net::SocketAddr::new(std::net::IpAddr::V4(v4), 53),
         IpAddr::V6(v6) => std::net::SocketAddr::new(std::net::IpAddr::V6(v6), 53),
     };
-    let id_bytes = id.to_be_bytes();
-    // Send with retry: bind errors on the first attempt mean the source port is
-    // taken by another process; our fallback bind used :0 so we are fine.
     sock.send_to(&packet, target).map_err(|e| e.to_string())?;
+    let id_bytes = id.to_be_bytes();
     let deadline = Instant::now() + Duration::from_millis(1500);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -329,7 +346,6 @@ fn dns_query_a(host: &str, server: IpAddr) -> Result<Vec<IpAddr>, String> {
         }
         match sock.recv_from(&mut buf) {
             Ok((n, _)) => {
-                // Only accept a response whose ID matches this query.
                 if n >= 2 && buf[0] == id_bytes[0] && buf[1] == id_bytes[1] {
                     return parse_a_response(&buf[..n]);
                 }
