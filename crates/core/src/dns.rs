@@ -121,7 +121,7 @@ pub async fn resolve_a(host: &str, dns: &str, use_doh: bool, doh_address: &str) 
         if !ips.is_empty() {
             return ips;
         }
-        log::warn!("[dns] DoH failed for {host} (configured={configured:?}) -> trying plain DNS");
+        log::info!("[dns] DoH failed for {host} -> falling back to plain DNS");
         // DoH endpoints unreachable (blocked / timeout in CN): fall through to
         // plain DNS instead of giving up. This is safe even for intercepted
         // hosts because our lookups bind OURS_DNS_SRC_PORT, which the WinDivert
@@ -143,7 +143,7 @@ pub async fn resolve_a(host: &str, dns: &str, use_doh: bool, doh_address: &str) 
 async fn plain_lookup(host: &str, configured: Option<IpAddr>) -> Option<Vec<IpAddr>> {
     if let Some(srv) = configured {
         let ips = resolve_udp(host, Some(srv)).await;
-        log::warn!("[dns] plain lookup {host} via configured {srv} -> {ips:?}");
+        log::debug!("[dns] plain lookup {host} via configured {srv} -> {ips:?}");
         if !ips.is_empty() {
             return Some(ips);
         }
@@ -153,7 +153,7 @@ async fn plain_lookup(host: &str, configured: Option<IpAddr>) -> Option<Vec<IpAd
             continue;
         }
         let ips = resolve_udp(host, Some(srv)).await;
-        log::warn!("[dns] plain lookup {host} via system {srv} -> {ips:?}");
+        log::debug!("[dns] plain lookup {host} via system {srv} -> {ips:?}");
         if !ips.is_empty() {
             return Some(ips);
         }
@@ -294,8 +294,13 @@ pub const OURS_DNS_SRC_PORT: u16 = 53453;
 /// concurrency; each query gets a unique ID so responses cannot cross-talk.
 static DNS_SOCK: OnceLock<std::net::UdpSocket> = OnceLock::new();
 static DNS_ID: AtomicU16 = AtomicU16::new(0x1234);
+/// Serializes send+recv on the shared socket: without this, concurrent queries
+/// race on recv_from and steal each other's responses (verified: 4 concurrent
+/// queries → only 1 succeeds). UDP round-trips are <100ms so the lock is cheap.
+static DNS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn dns_query_a(host: &str, server: IpAddr) -> Result<Vec<IpAddr>, String> {
+    let _guard = DNS_LOCK.lock().unwrap();
     let mut buf = [0u8; 4096];
     let id = DNS_ID.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     let packet = build_a_query_with_id(host, id, &mut buf)?;
