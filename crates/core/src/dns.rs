@@ -113,22 +113,39 @@ pub async fn resolve_a(host: &str, dns: &str, use_doh: bool, doh_address: &str) 
         .ok()
         .filter(|_| dns.trim() != "System Default");
     if use_doh {
-        let ips = if !doh_address.is_empty() {
-            resolve_doh(host, doh_address).await
-        } else {
-            race_doh(host).await
-        };
-        if !ips.is_empty() {
-            return ips;
+        // Race DoH and plain DNS concurrently. DoH endpoints are often
+        // unreachable or return poisoned results in CN, so plain DNS is the
+        // reliable path — but we keep DoH too in case plain DNS is also blocked.
+        let doh_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Vec<IpAddr>> + Send>> =
+            if !doh_address.is_empty() {
+                Box::pin(resolve_doh(host, doh_address))
+            } else {
+                Box::pin(race_doh(host))
+            };
+        let plain_fut = async { plain_lookup(host, configured).await.unwrap_or_default() };
+        tokio::pin!(doh_fut);
+        tokio::pin!(plain_fut);
+        // Wait up to 5s for either to produce results; prefer plain DNS
+        // (more reliable in CN networks where DoH endpoints are blocked).
+        let mut doh_ips = Vec::new();
+        let mut plain_ips = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() { break; }
+            tokio::select! {
+                ips = &mut doh_fut, if doh_ips.is_empty() => { doh_ips = ips; }
+                ips = &mut plain_fut, if plain_ips.is_empty() => { plain_ips = ips; }
+                _ = tokio::time::sleep(remaining) => { break; }
+            }
+            if !plain_ips.is_empty() { break; }
         }
-        log::info!("[dns] DoH failed for {host} -> falling back to plain DNS");
-        // DoH endpoints unreachable (blocked / timeout in CN): fall through to
-        // plain DNS instead of giving up. This is safe even for intercepted
-        // hosts because our lookups bind OURS_DNS_SRC_PORT, which the WinDivert
-        // filter exempts - a random source port would be answered 127.0.0.1 and
-        // the proxy would connect to itself.
-        if let Some(ips) = plain_lookup(host, configured).await {
-            return ips;
+        // Prefer plain DNS results (DoH may return poisoned IPs in CN).
+        if !plain_ips.is_empty() {
+            return plain_ips;
+        }
+        if !doh_ips.is_empty() {
+            return doh_ips;
         }
         return Vec::new();
     }
@@ -164,19 +181,28 @@ async fn plain_lookup(host: &str, configured: Option<IpAddr>) -> Option<Vec<IpAd
 /// Race every known DoH endpoint against `host` and take the first non-empty
 /// answer.
 async fn race_doh(host: &str) -> Vec<IpAddr> {
-    let mut tasks = Vec::new();
-    for addr in doh_addresses() {
-        let host = host.to_string();
-        tasks.push(tokio::spawn(async move { resolve_doh(&host, addr).await }));
-    }
-    for t in tasks {
-        if let Ok(ips) = t.await {
-            if !ips.is_empty() {
-                return ips;
+    // Race every DoH endpoint concurrently, but cap the whole thing at 5s:
+    // if none has answered by then (all blocked/timeout in CN), give up so the
+    // caller can fall through to plain DNS instead of blocking for up to 50s
+    // (10 endpoints x 5s timeout each, awaited sequentially).
+    let timeout = Duration::from_secs(5);
+    tokio::time::timeout(timeout, async {
+        let mut tasks = Vec::new();
+        for addr in doh_addresses() {
+            let host = host.to_string();
+            tasks.push(tokio::spawn(async move { resolve_doh(&host, addr).await }));
+        }
+        for t in tasks {
+            if let Ok(ips) = t.await {
+                if !ips.is_empty() {
+                    return ips;
+                }
             }
         }
-    }
-    Vec::new()
+        Vec::new()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// DNS servers tried for TCP fallback, in order:
@@ -308,7 +334,7 @@ fn dns_query_a(host: &str, server: IpAddr) -> Result<Vec<IpAddr>, String> {
     let sock = DNS_SOCK.get_or_init(|| {
         let s = std::net::UdpSocket::bind(("0.0.0.0".to_string(), OURS_DNS_SRC_PORT))
             .unwrap_or_else(|_| std::net::UdpSocket::bind("0.0.0.0:0").expect("bind dns sock"));
-        let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
         s
     });
     let target = match server {
@@ -319,7 +345,7 @@ fn dns_query_a(host: &str, server: IpAddr) -> Result<Vec<IpAddr>, String> {
     // Send with retry: bind errors on the first attempt mean the source port is
     // taken by another process; our fallback bind used :0 so we are fine.
     sock.send_to(&packet, target).map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_millis(1500);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
