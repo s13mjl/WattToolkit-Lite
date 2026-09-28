@@ -149,6 +149,7 @@ async fn handle_connect(mut tcp: TcpStream, target: &str, rt: &FwdRuntime) -> Re
     } else {
         Vec::new()
     };
+    rt.send_log(format!("[TUNNEL] {host}:{port} resolved to {ips:?}"));
     let upstream = match http1::connect_upstream(&host, port, &ips).await {
         Some(s) => s,
         None => {
@@ -344,6 +345,7 @@ async fn handle_http(
     } else {
         Vec::new()
     };
+    rt.send_log(format!("[MITM] {host}:{port} resolved to {ips:?}"));
     let upstream = match http1::connect_upstream(&host, port, &ips).await {
         Some(s) => s,
         None => {

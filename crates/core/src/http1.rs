@@ -380,9 +380,22 @@ pub async fn connect_upstream(host: &str, port: u16, ips: &[std::net::IpAddr]) -
     // the fastest to connect (localhost) - the proxy would race-connect to its own
     // 443 listener and the TLS handshake fails. `host` is kept only for logging.
     let _ = host;
-    let candidates: Vec<std::net::SocketAddr> = ips
+    let mut candidates: Vec<std::net::SocketAddr> = ips
         .iter()
         .map(|ip| std::net::SocketAddr::new(*ip, port))
         .collect();
+    // Known-good fallback IPs: some DNS servers return IPs that are TCP-blocked
+    // on certain CN networks (e.g. github.com 20.205.243.166). Add alternative
+    // IPs that are commonly reachable so race_connect tries them too.
+    if host.ends_with("github.com") || host.ends_with("githubusercontent.com") {
+        for ip in ["140.82.112.3", "140.82.112.4", "140.82.112.9"] {
+            if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
+                let sa = std::net::SocketAddr::new(addr, port);
+                if !candidates.contains(&sa) {
+                    candidates.push(sa);
+                }
+            }
+        }
+    }
     race_connect(&candidates, CONNECT_TIMEOUT).await
 }

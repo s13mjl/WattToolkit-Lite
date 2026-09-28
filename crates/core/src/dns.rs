@@ -113,41 +113,17 @@ pub async fn resolve_a(host: &str, dns: &str, use_doh: bool, doh_address: &str) 
         .ok()
         .filter(|_| dns.trim() != "System Default");
     if use_doh {
-        // Race DoH and plain DNS concurrently. DoH endpoints are often
-        // unreachable or return poisoned results in CN, so plain DNS is the
-        // reliable path — but we keep DoH too in case plain DNS is also blocked.
-        let doh_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Vec<IpAddr>> + Send>> =
-            if !doh_address.is_empty() {
-                Box::pin(resolve_doh(host, doh_address))
-            } else {
-                Box::pin(race_doh(host))
-            };
-        let plain_fut = async { plain_lookup(host, configured).await.unwrap_or_default() };
-        tokio::pin!(doh_fut);
-        tokio::pin!(plain_fut);
-        // Wait up to 5s for either to produce results; prefer plain DNS
-        // (more reliable in CN networks where DoH endpoints are blocked).
-        let mut doh_ips = Vec::new();
-        let mut plain_ips = Vec::new();
-        let deadline = std::time::Instant::now() + Duration::from_secs(6);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() { break; }
-            tokio::select! {
-                ips = &mut doh_fut, if doh_ips.is_empty() => { doh_ips = ips; }
-                ips = &mut plain_fut, if plain_ips.is_empty() => { plain_ips = ips; }
-                _ = tokio::time::sleep(remaining) => { break; }
-            }
-            if !plain_ips.is_empty() { break; }
+        // Plain DNS first: it is fast (<100ms) and reliable. DoH endpoints are
+        // often blocked or return poisoned results in CN networks, and waiting
+        // for them to time out (5-6s) makes every request unacceptably slow.
+        // DoH is only used as a last resort if plain DNS also fails.
+        if let Some(ips) = plain_lookup(host, configured).await {
+            return ips;
         }
-        // Prefer plain DNS results (DoH may return poisoned IPs in CN).
-        if !plain_ips.is_empty() {
-            return plain_ips;
+        if !doh_address.is_empty() {
+            return resolve_doh(host, doh_address).await;
         }
-        if !doh_ips.is_empty() {
-            return doh_ips;
-        }
-        return Vec::new();
+        return race_doh(host).await;
     }
     if let Some(ips) = plain_lookup(host, configured).await {
         return ips;
