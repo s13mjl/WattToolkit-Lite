@@ -55,6 +55,9 @@ pub async fn run_forward_proxy_on(listener: TcpListener, rt: FwdRuntime) -> Resu
     loop {
         match listener.accept().await {
             Ok((tcp, _peer)) => {
+                // Disable Nagle on the client side too: the relay writes whole
+                // buffers, and Nagle only added latency here (see http1.rs).
+                let _ = tcp.set_nodelay(true);
                 let rt = rt.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_conn(tcp, rt).await {

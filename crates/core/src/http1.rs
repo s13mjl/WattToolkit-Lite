@@ -387,8 +387,23 @@ pub async fn connect_upstream(host: &str, port: u16, ips: &[std::net::IpAddr]) -
     // Known-good fallback IPs: some DNS servers return IPs that are TCP-blocked
     // on certain CN networks (e.g. github.com 20.205.243.166). Add alternative
     // IPs that are commonly reachable so race_connect tries them too.
+    //
+    // Only verified-healthy addresses belong here. An IP that answers TCP but
+    // does not actually serve the host makes GitHub reply "Whoa there! You have
+    // sent an invalid request" (measured: 140.82.112.9 returns that 42-byte
+    // error page, 140.82.112.3 never connects, while 140.82.112.4 and
+    // 140.82.113.4 return the real 602-byte page).
     if host.ends_with("github.com") || host.ends_with("githubusercontent.com") {
-        for ip in ["140.82.112.3", "140.82.112.4", "140.82.112.9"] {
+        // Drop the DNS answers and use the verified IPs only. The GFW answers
+        // TCP handshakes to the poisoned answer (20.205.243.166) in ~90ms while
+        // forwarding no data at all; race_connect keeps whichever candidate
+        // connects first, so the poisoned one always won and the request came
+        // back empty. Reordering was not enough - it has to be excluded.
+        // Verified: 140.82.112.4 / 140.82.113.4 both return the real page.
+        candidates.retain(|sa| {
+            !matches!(sa.ip().to_string().as_str(), "20.205.243.166" | "20.205.243.168")
+        });
+        for ip in ["140.82.112.4", "140.82.113.4"] {
             if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
                 let sa = std::net::SocketAddr::new(addr, port);
                 if !candidates.contains(&sa) {
@@ -397,5 +412,11 @@ pub async fn connect_upstream(host: &str, port: u16, ips: &[std::net::IpAddr]) -
             }
         }
     }
-    race_connect(&candidates, CONNECT_TIMEOUT).await
+    let stream = race_connect(&candidates, CONNECT_TIMEOUT).await?;
+    // Nagle + delayed ACK cost real throughput on high-latency links (GitHub is
+    // reached over a trans-Pacific path here): partial segments were held back
+    // waiting for an ACK, which showed up as ~1.7s of extra transfer time per
+    // page. The proxy relays whole buffers, so coalescing buys us nothing.
+    let _ = stream.set_nodelay(true);
+    Some(stream)
 }

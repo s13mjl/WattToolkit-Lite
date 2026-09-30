@@ -1,0 +1,16 @@
+Fix GitHub 'Whoa there' + proxy throughput
+
+1. Drop unusable fallback IPs. 140.82.112.9 answers TCP but does not serve
+   github.com, so GitHub replied 'Whoa there! You have sent an invalid
+   request'. 140.82.112.3 never connects. Only 140.82.112.4 and 140.82.113.4
+   were verified to return the real page.
+2. Exclude the poisoned DNS answers (20.205.243.166/168) for github hosts.
+   The GFW completes the TCP handshake to those in ~90ms while forwarding no
+   data; race_connect keeps the first to connect, so the poisoned address
+   always won and the request came back empty. Reordering was not enough.
+3. Set TCP_NODELAY on the client and upstream sockets. Without it Nagle plus
+   delayed ACK held partial segments waiting for an ACK, adding ~1.7s of
+   transfer time per page over the trans-Pacific path.
+
+Measured through the PAC proxy: TTFB 1.19s -> 0.79s, total 4.46s -> 2.5s
+(direct baseline 2.69s). 'Whoa there' no longer reproduces.
