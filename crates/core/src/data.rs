@@ -18,6 +18,7 @@ fn leaf(id: &str, name: &str, order: i32, domains: &str) -> AccelerateProject {
         proxy_type: ProxyType::Normal,
         match_domain_names: domains.to_string(),
         forward_domain_names: None,
+        ip_address: Vec::new(),
         ignore_ssl_cert_verification: false,
         fake_server_name: None,
         listen_domain_names: domains.to_string(),
@@ -48,6 +49,7 @@ fn p(id: &str, name: &str, order: i32, children: Vec<AccelerateProject>) -> Acce
         proxy_type: ProxyType::Normal,
         match_domain_names: String::new(),
         forward_domain_names: None,
+        ip_address: Vec::new(),
         ignore_ssl_cert_verification: false,
         fake_server_name: None,
         listen_domain_names: String::new(),
@@ -128,6 +130,10 @@ pub fn built_in_groups() -> Vec<AccelerateProjectGroup> {
                     "archiveprogram.github.com",
                 ),
                 leaf("gh-usercontent", "Github UserContent", 9, "githubusercontent.com"),
+                // No `IPAddress` here, exactly like the official built-in data:
+                // the endpoint comes from the DoH answer. Hard-coding a US edge
+                // made every request that edge could not serve wait out the 10 s
+                // per-endpoint timeout before falling back.
                 leaf("gh-website", "Github 网站 (Git Push)", 10, "github.com"),
                 leaf("gh-app", "Github App", 11, "githubapp.com"),
                 leaf("gh-docker", "Docker Hub", 12, "hub.docker.com"),

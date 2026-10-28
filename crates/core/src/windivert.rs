@@ -237,30 +237,39 @@ fn modify_dns_packet(
     let qend = i + 4;
     let domain = labels.join(".");
     let dl = domain.to_lowercase();
-    if !domains.iter().any(|d| dl == *d || dl.ends_with(&format!(".{d}"))) { return None; }
+    // `*.x.com` patterns must cover sub-domains too, mirroring the proxy
+    // matcher (`domain_matches`); bare hostnames keep the suffix rule.
+    let matched = domains.iter().any(|d| {
+        let d = d.trim().to_lowercase();
+        let base = d.strip_prefix("*.").unwrap_or(&d);
+        !base.is_empty() && (dl == base || dl.ends_with(&format!(".{base}")))
+    });
+    if !matched {
+        return None;
+    }
 
-    // Build the response payload: header + question + one answer record.
-    let loopback: Vec<u8> = if qtype == 1 {
-        vec![127, 0, 0, 1]
-    } else {
-        let mut v = vec![0u8; 16];
-        v[15] = 1; // ::1
-        v
-    };
+    // Build the response payload: header + question, plus one answer record for an
+    // A query. An AAAA query is answered with an empty NOERROR response (NODATA)
+    // instead of `::1`: the 443 listener has no IPv6 socket, so `::1` would be a
+    // dead end, while passing the query through would defeat the interception. The
+    // cost of that rule is that a v6-only client is pushed back to v4.
     let mut resp = Vec::new();
     resp.extend_from_slice(&packet[dns..dns + 2]); // transaction id
     resp.extend_from_slice(&[0x81, 0x80]);         // response, recursion available
     resp.extend_from_slice(&[0x00, 0x01]);         // qdcount
-    resp.extend_from_slice(&[0x00, 0x01]);         // ancount
+    let ancount: [u8; 2] = if qtype == 1 { [0x00, 0x01] } else { [0x00, 0x00] };
+    resp.extend_from_slice(&ancount);
     resp.extend_from_slice(&[0x00, 0x00]);
     resp.extend_from_slice(&[0x00, 0x00]);
     resp.extend_from_slice(&packet[dns + 12..qend]); // question
-    resp.extend_from_slice(&[0xC0, 0x0C]);          // name pointer
-    resp.extend_from_slice(&qtype.to_be_bytes());
-    resp.extend_from_slice(&[0x00, 0x01]);          // class IN
-    resp.extend_from_slice(&300u32.to_be_bytes());  // ttl 5 min (original)
-    resp.extend_from_slice(&(loopback.len() as u16).to_be_bytes());
-    resp.extend_from_slice(&loopback);
+    if qtype == 1 {
+        resp.extend_from_slice(&[0xC0, 0x0C]);          // name pointer
+        resp.extend_from_slice(&qtype.to_be_bytes());
+        resp.extend_from_slice(&[0x00, 0x01]);          // class IN
+        resp.extend_from_slice(&300u32.to_be_bytes());  // ttl 5 min (original)
+        resp.extend_from_slice(&4u16.to_be_bytes());    // rdlength
+        resp.extend_from_slice(&[127, 0, 0, 1]);        // 127.0.0.1
+    }
 
     if dns + resp.len() > packet.len() { return None; }
     packet[dns..dns + resp.len()].copy_from_slice(&resp);
@@ -348,4 +357,93 @@ fn ip_checksum(data: &[u8]) -> u16 {
         sum = (sum >> 16) + (sum & 0xffff);
     }
     !(sum as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An IPv4 + UDP DNS query for `name` of type `qtype`, laid out like a captured
+    /// packet. The returned length is the packet length; the buffer has spare room
+    /// behind it, exactly like the receive buffer the hook rewrites in place.
+    fn dns_query(name: &str, qtype: u16) -> (Vec<u8>, u32, Vec<u8>) {
+        let mut question = Vec::new();
+        for label in name.split('.') {
+            question.push(label.len() as u8);
+            question.extend_from_slice(label.as_bytes());
+        }
+        question.push(0);
+        question.extend_from_slice(&qtype.to_be_bytes());
+        question.extend_from_slice(&1u16.to_be_bytes()); // class IN
+
+        let udp_len = 8 + 12 + question.len();
+        let total = 20 + udp_len;
+        let mut packet = vec![0u8; total + 512];
+        packet[0] = 0x45; // IPv4, 5-word header
+        packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        packet[8] = 64; // ttl
+        packet[9] = 17; // UDP
+        packet[12..16].copy_from_slice(&[192, 168, 0, 2]); // source address
+        packet[16..20].copy_from_slice(&[8, 8, 8, 8]); // destination address
+        let udp = 20;
+        packet[udp..udp + 2].copy_from_slice(&51000u16.to_be_bytes()); // source port
+        packet[udp + 2..udp + 4].copy_from_slice(&53u16.to_be_bytes()); // destination
+        packet[udp + 4..udp + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        let dns = udp + 8;
+        packet[dns..dns + 2].copy_from_slice(&0x1234u16.to_be_bytes()); // transaction id
+        packet[dns + 2..dns + 4].copy_from_slice(&[0x01, 0x00]); // standard query, RD
+        packet[dns + 4..dns + 6].copy_from_slice(&1u16.to_be_bytes()); // qdcount
+        packet[dns + 12..dns + 12 + question.len()].copy_from_slice(&question);
+        (packet, total as u32, vec![0u8; 64])
+    }
+
+    fn intercept_set() -> HashSet<String> {
+        ["*.steamcommunity.com".to_string()].into_iter().collect()
+    }
+
+    #[test]
+    fn an_a_query_is_answered_with_the_loopback_address() {
+        let domains = intercept_set();
+        let (mut packet, mut len, mut addr) = dns_query("store.steamcommunity.com", 1);
+        assert_eq!(
+            windivert_modify_dns_packet(&mut packet, &mut len, &mut addr, &domains).as_deref(),
+            Some("store.steamcommunity.com")
+        );
+        let payload = &packet[28..len as usize];
+        assert_eq!(&payload[2..4], &[0x81, 0x80]); // NOERROR response, RA set
+        assert_eq!(&payload[6..8], &[0x00, 0x01]); // ancount = 1
+        assert_eq!(&payload[payload.len() - 4..], &[127, 0, 0, 1]); // the A record
+    }
+
+    #[test]
+    fn an_aaaa_query_is_answered_with_nodata() {
+        let domains = intercept_set();
+        let (mut packet, query_len, mut addr) = dns_query("store.steamcommunity.com", 28);
+        let mut len = query_len;
+        assert_eq!(
+            windivert_modify_dns_packet(&mut packet, &mut len, &mut addr, &domains).as_deref(),
+            Some("store.steamcommunity.com")
+        );
+        let payload = &packet[28..len as usize];
+        assert_eq!(&payload[2..4], &[0x81, 0x80]); // NOERROR response, RA set
+        assert_eq!(&payload[6..8], &[0x00, 0x00]); // ancount = 0: NODATA, not `::1`
+        assert_eq!(&payload[8..12], &[0x00, 0x00, 0x00, 0x00]); // no authority/additional
+        // The empty answer is exactly the question echoed back, so the rewritten
+        // length matches the query it replaced.
+        assert_eq!(len, query_len);
+    }
+
+    #[test]
+    fn a_query_outside_the_intercept_set_is_left_alone() {
+        let domains = intercept_set();
+        let (mut packet, mut len, mut addr) = dns_query("example.test", 1);
+        let before = packet.clone();
+        let before_len = len;
+        assert_eq!(
+            windivert_modify_dns_packet(&mut packet, &mut len, &mut addr, &domains),
+            None
+        );
+        assert_eq!(packet, before);
+        assert_eq!(len, before_len);
+    }
 }

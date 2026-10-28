@@ -6,15 +6,12 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-eframe = "0.29.1"
-egui = "0.29.1"
 env_logger = "0.11.11"
 image = "0.25.10"
 log = "0.4.34"
-tray-icon = "0.24.2"
 wtlite-core = { path = "../core" }
 wtlite-ui = { path = "../ui" }
 
 [build-dependencies]
-# Embeds the .ico (and version info) into the exe so Explorer/taskbar show the icon.
+# Embeds the .ico, application manifest and version info into the exe.
 embed-resource = "3.0.11"

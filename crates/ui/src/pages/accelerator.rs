@@ -1,489 +1,396 @@
-//! Acceleration page (mirrors AcceleratorPage2).
+//! Acceleration page: right control panel + six sub-tabs.
 
-use crate::App;
-use eframe::egui;
-use std::collections::HashSet;
-use wtlite_core::model::{AccelerateProject, AccelerateProjectGroup, ProxyMode};
+use std::collections::HashMap;
 
-/// Hosts file location (Windows).
-const HOSTS_PATH: &str = r"C:\Windows\System32\drivers\etc\hosts";
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::UI::Controls::{HTREEITEM, TVI_ROOT};
+use windows_sys::Win32::UI::WindowsAndMessaging as wm;
 
-/// Sub-tabs of the acceleration page.
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum AccTab {
-    Platform,
-    Services,
-    Scripts,
-    Logs,
-    Traffic,
-    NetTest,
+use wtlite_core::model::{AccelerateProject, ProxyMode};
+
+use crate::win32::{self, controls, Rect};
+use crate::{ids, state, App};
+
+#[derive(Clone, Debug)]
+pub enum NodeRef {
+    Group(String),
+    Leaf(String),
 }
 
-/// Per-page state (sub-tab + network test results).
-pub struct AccState {
-    pub tab: AccTab,
-    pub net_test_results: Vec<wtlite_core::nettest::TestResult>,
-    pub testing: bool,
-    /// Group names that are currently collapsed (empty = all expanded).
-    pub collapsed: HashSet<String>,
+pub unsafe fn build(app: &mut App) {
+    let h = app.hwnd;
+    let ui = app.fonts.ui;
+    let bold = app.fonts.bold;
+
+    app.ui.accel_heading = crate::pages::left_label(h, "加速控制", ids::ACCEL_HEADING, bold);
+    app.ui.start = win32::create_control(
+        h,
+        windows_sys::Win32::UI::Controls::WC_BUTTONW,
+        "启动加速",
+        wm::BS_PUSHBUTTON as u32 | wm::WS_TABSTOP,
+        0,
+        ids::START,
+        Rect::default(),
+        app.fonts.button,
+    );
+    app.ui.mode_label = crate::pages::left_label(h, "加速模式:", ids::MODE_LABEL, ui);
+    app.ui.mode_combo = crate::pages::combo(h, ids::MODE_COMBO, ui, false);
+    let modes: Vec<&str> = ProxyMode::available().iter().map(|m| m.display_name()).collect();
+    win32::combo_fill(app.ui.mode_combo, &modes);
+    win32::set_combo_sel(app.ui.mode_combo, state::mode_index(app.settings.proxy.proxy_mode));
+    app.ui.proxy_settings = crate::pages::button(h, "代理设置", ids::PROXY_SETTINGS, ui);
+
+    app.ui.cert_heading = crate::pages::left_label(h, "证书", ids::CERT_HEADING, bold);
+    app.ui.cert_install = crate::pages::button(h, "安装证书", ids::CERT_INSTALL, ui);
+    app.ui.cert_remove = crate::pages::button(h, "删除证书", ids::CERT_REMOVE, ui);
+    app.ui.cert_view = crate::pages::button(h, "查看", ids::CERT_VIEW, ui);
+    app.ui.cert_open_dir = crate::pages::button(h, "打开目录", ids::CERT_OPEN_DIR, ui);
+
+    app.ui.hosts_heading = crate::pages::left_label(h, "Hosts", ids::HOSTS_HEADING, bold);
+    app.ui.hosts_edit = crate::pages::button(h, "编辑", ids::HOSTS_EDIT, ui);
+    app.ui.hosts_reset = crate::pages::button(h, "重置", ids::HOSTS_RESET, ui);
+    app.ui.hosts_open = crate::pages::button(h, "打开", ids::HOSTS_OPEN, ui);
+    app.ui.open_log_dir = crate::pages::button(h, "打开日志目录", ids::OPEN_LOG_DIR, ui);
+
+    app.ui.acc_tabs = controls::make_tabs(h, ids::ACC_TABS, Rect::default(), ui);
+    controls::tabs_add(
+        app.ui.acc_tabs,
+        &["平台加速", "服务", "加速脚本", "代理日志", "流量统计", "网络检测"],
+    );
+    controls::tabs_set_sel(app.ui.acc_tabs, 0);
+
+    app.ui.platform_tree = controls::make_tree(h, ids::PLATFORM_TREE, Rect::default(), ui, false);
+    app.ui.services_tree = controls::make_tree(h, ids::SERVICES_TREE, Rect::default(), ui, true);
+
+    app.ui.script_enable = crate::pages::checkbox(h, "启用加速脚本", ids::SCRIPT_ENABLE, ui);
+    win32::set_check(app.ui.script_enable, app.settings.proxy.is_enable_script);
+    app.ui.script_desc = crate::pages::wrap_label(
+        h,
+        "加速脚本用于自定义域名匹配与转发规则。当前版本提供基础开关。",
+        ids::SCRIPT_DESC,
+        ui,
+    );
+
+    app.ui.logs_clear = crate::pages::button(h, "清空", ids::LOGS_CLEAR, ui);
+    app.ui.logs_label = crate::pages::left_label(h, "代理日志（最新 1000 条）", ids::LOGS_LABEL, ui);
+    app.ui.logs_edit = win32::create_control(
+        h,
+        windows_sys::Win32::UI::Controls::WC_EDITW,
+        "",
+        wm::ES_MULTILINE as u32
+            | wm::ES_READONLY as u32
+            | wm::ES_AUTOVSCROLL as u32
+            | wm::WS_VSCROLL
+            | wm::WS_TABSTOP,
+        0,
+        ids::LOGS_EDIT,
+        Rect::default(),
+        app.fonts.log,
+    );
+    windows_sys::Win32::UI::Controls::SetWindowTheme(
+        app.ui.logs_edit,
+        windows_sys::core::w!("DarkMode_Explorer"),
+        std::ptr::null(),
+    );
+
+    app.ui.traffic_total = crate::pages::left_label(h, "总流量: 0 字节", ids::TRAFFIC_TOTAL, ui);
+    app.ui.traffic_list = controls::make_list(h, ids::TRAFFIC_LIST, Rect::default(), ui);
+    controls::list_columns(app.ui.traffic_list, &[("域名", 300), ("字节", 100)]);
+
+    app.ui.nettest_start = crate::pages::button(h, "开始检测", ids::NETTEST_START, ui);
+    app.ui.nettest_hint = crate::pages::left_label(
+        h,
+        "点击“开始检测”运行网络诊断。",
+        ids::NETTEST_HINT,
+        ui,
+    );
+    app.ui.nettest_list = controls::make_list(h, ids::NETTEST_LIST, Rect::default(), ui);
+    controls::list_columns(app.ui.nettest_list, &[("项目", 200), ("结果", 300)]);
+
+    rebuild_platform(app);
+    rebuild_services(app);
+    sync_checks(app);
+    refresh_nettest(app);
 }
 
-impl Default for AccState {
-    fn default() -> Self {
-        Self {
-            tab: AccTab::Platform,
-            net_test_results: Vec::new(),
-            testing: false,
-            collapsed: HashSet::new(),
-        }
-    }
-}
-
-pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let mut tab = crate::pages::GLOBAL_ACC.lock().unwrap().tab;
-
-    egui::SidePanel::right("right_panel")
-        .exact_width(280.0)
-        .resizable(false)
-        .show_inside(ui, |ui| {
-            ui.add_space(8.0);
-            right_panel(app, ui);
-        });
-
-    ui.add_space(8.0);
-    crate::pages::hrow(ui, |ui| {
-        if crate::pages::tab_btn(ui, tab == AccTab::Platform, "平台加速") {
-            tab = AccTab::Platform;
-        }
-        if crate::pages::tab_btn(ui, tab == AccTab::Services, "服务") {
-            tab = AccTab::Services;
-        }
-        if crate::pages::tab_btn(ui, tab == AccTab::Scripts, "加速脚本") {
-            tab = AccTab::Scripts;
-        }
-        if crate::pages::tab_btn(ui, tab == AccTab::Logs, "代理日志") {
-            tab = AccTab::Logs;
-        }
-        if crate::pages::tab_btn(ui, tab == AccTab::Traffic, "流量统计") {
-            tab = AccTab::Traffic;
-        }
-        if crate::pages::tab_btn(ui, tab == AccTab::NetTest, "网络检测") {
-            tab = AccTab::NetTest;
-        }
-    });
-    {
-        let mut st = crate::pages::GLOBAL_ACC.lock().unwrap();
-        st.tab = tab;
-    }
-
-    ui.separator();
-    ui.add_space(4.0);
-
-    egui::ScrollArea::vertical().show(ui, |ui| match tab {
-        AccTab::Platform => platform_tab(app, ui),
-        AccTab::Services => services_tab(app, ui),
-        AccTab::Scripts => scripts_tab(app, ui),
-        AccTab::Logs => logs_tab(app, ui),
-        AccTab::Traffic => traffic_tab(app, ui),
-        AccTab::NetTest => net_test_tab(app, ui),
-    });
-}
-
-fn right_panel(app: &mut App, ui: &mut egui::Ui) {
-    ui.heading("加速控制");
-    let running = app.proxy.is_running();
-    let btn = if running {
-        egui::Button::new(
-            egui::RichText::new("停止加速").color(egui::Color32::from_rgb(255, 120, 120)),
-        )
-    } else {
-        egui::Button::new(
-            egui::RichText::new("启动加速").color(egui::Color32::from_rgb(120, 255, 120)),
-        )
-    };
-    if ui.add_sized([240.0, 44.0], btn).clicked() {
-        if running {
-            app.proxy.stop();
-            app.set_toast("加速已停止");
-        } else {
-            let groups = app.accel.groups();
-            let ids: Vec<String> = groups
-                .iter()
-                .flat_map(|g| g.items.iter().flat_map(|p| p.enabled_ids()))
-                .collect();
-            app.settings.proxy.support_proxy_services_status = ids;
-            let _ = app.settings.save();
-            let mode = app.settings.proxy.proxy_mode;
-            let settings = app.settings.proxy.clone();
-            start_async(app, mode, settings, groups);
-        }
-    }
-    ui.add_space(8.0);
-
-    // 加速模式快速切换（原项目代理设置中的模式选择）。
-    crate::pages::hrow(ui, |ui| {
-        ui.label("加速模式:");
-        let m = app.settings.proxy.proxy_mode;
-        egui::ComboBox::from_id_salt("accel_mode")
-            .selected_text(m.display_name())
-            .width(140.0)
-            .show_ui(ui, |ui| {
-                for mode in wtlite_core::model::ProxyMode::available() {
-                    let selected = *mode == app.settings.proxy.proxy_mode;
-                    if ui.selectable_label(selected, mode.display_name()).clicked() {
-                        app.switch_proxy_mode(*mode);
-                    }
-                }
-            });
-    });
-    ui.add_space(4.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    if ui.button("代理设置").clicked() {
-        app.proxy_dialog = Some(crate::ProxySettingsDialog::from_settings(&app.settings.proxy));
-    }
-    ui.add_space(8.0);
-
-    ui.heading("证书");
-    crate::pages::hrow(ui, |ui| {
-        if ui.button("安装证书").clicked() {
-            let msg = app.proxy.cert.install().unwrap_or_else(|e| format!("失败: {e}"));
-            app.set_toast(format!("证书: {msg}"));
-        }
-        if ui.button("删除证书").clicked() {
-            let msg = app.proxy.cert.remove().unwrap_or_else(|e| format!("失败: {e}"));
-            app.set_toast(format!("证书: {msg}"));
-        }
-        if ui.button("查看").clicked() {
-            app.cert_dialog = Some(app.proxy.cert.info());
-        }
-        if ui.button("打开目录").clicked() {
-            let _ = open::that(wtlite_core::paths::cert_dir().to_string_lossy().to_string());
-        }
-    });
-    ui.add_space(8.0);
-
-    ui.heading("Hosts");
-    crate::pages::hrow(ui, |ui| {
-        if ui.button("编辑").clicked() {
-            let _ = open::that(HOSTS_PATH);
-        }
-        if ui.button("重置").clicked() {
-            let r = wtlite_core::hosts::reset_file();
-            app.set_toast(match r {
-                Ok(()) => "Hosts 已重置".to_string(),
-                Err(e) => format!("重置失败: {e}"),
-            });
-        }
-        if ui.button("打开").clicked() {
-            let _ = open::that(HOSTS_PATH);
-        }
-    });
-    ui.add_space(8.0);
-
-    if ui.button("打开日志目录").clicked() {
-        let _ = open::that(wtlite_core::paths::log_dir().to_string_lossy().to_string());
-    }
-}
-
-/// Last proxy start error, surfaced to the UI on the next frame.
-pub static START_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-/// Start the proxy on a background thread.
-///
-/// The runtime is owned by `ProxyManager` (`start_blocking`), because the
-/// listeners are spawned tasks: a runtime that dies with this thread would
-/// cancel them, leaving the UI reporting "running" while nothing is bound.
-pub(crate) fn start_async(
-    app: &mut App,
-    mode: ProxyMode,
-    settings: wtlite_core::settings::ProxySettings,
-    groups: Vec<AccelerateProjectGroup>,
-) {
-    let proxy = app.proxy.clone();
-    std::thread::spawn(move || {
-        match proxy.start_blocking(mode, &settings, &groups) {
-            Ok(()) => log::info!("proxy started ({mode:?})"),
-            Err(e) => {
-                log::error!("proxy start failed: {e}");
-                *START_ERROR.lock().unwrap() = Some(e);
-            }
-        }
-    });
-    app.set_toast(format!("正在启动加速…（{}）", mode.display_name()));
-}
-
-fn platform_tab(app: &mut App, ui: &mut egui::Ui) {
-    let groups = app.accel.groups();
-    if groups.is_empty() {
-        ui.label("尚未加载加速项目。");
+pub unsafe fn rebuild_platform(app: &mut App) {
+    let tree = app.ui.platform_tree;
+    if tree.is_null() {
         return;
     }
-    let mut toggled: Option<String> = None;
-    {
-        let st = crate::pages::GLOBAL_ACC.lock().unwrap();
-        for grp in &groups {
-            ui.add_space(4.0);
-            let grp_name = grp.name.clone();
-            let open = !st.collapsed.contains(&grp_name);
-            // Group header row: [arrow] [checkbox] name (n 项)
-            let mut on = group_enabled(grp);
-            crate::pages::hrow(ui, |ui| {
-                let arrow = if open { "▾" } else { "▸" };
-                if ui.add(egui::Button::new(arrow).small()).clicked() {
-                    toggled = Some(grp_name.clone());
-                }
-                if ui
-                    .checkbox(&mut on, format!("{} ({} 项)", grp.name, count_group_items(grp)))
-                    .changed()
-                {
-                    set_group_enable(app, &grp.name, on);
-                }
-            });
-            if open {
-                ui.indent(grp_name.as_str(), |ui| {
-                    for proj in &grp.items {
-                        project_tree(app, ui, proj);
-                    }
-                });
+    controls::tree_clear(tree);
+    app.platform_nodes.clear();
+    app.platform_groups.clear();
+    app.platform_leaves.clear();
+
+    for g in &app.groups {
+        let label = format!("{} ({} 项)", g.name, state::count_group_leaves(g));
+        let group_item = controls::tree_insert(tree, TVI_ROOT, &label, Some(state::group_enabled(g)), false);
+        if group_item == 0 {
+            continue;
+        }
+        app.platform_nodes
+            .insert(group_item, NodeRef::Group(g.name.clone()));
+        app.platform_groups.insert(g.name.clone(), group_item);
+        for p in &g.items {
+            insert_project(tree, group_item, p, &mut app.platform_nodes, &mut app.platform_leaves);
+        }
+    }
+}
+
+unsafe fn insert_project(
+    tree: HWND,
+    parent: HTREEITEM,
+    p: &AccelerateProject,
+    nodes: &mut HashMap<isize, NodeRef>,
+    leaves: &mut HashMap<String, HTREEITEM>,
+) {
+    if p.items.is_empty() {
+        let label = format!("{} ({} 个域名)", p.name, state::count_domains(&p.listen_domain_names));
+        let item = controls::tree_insert(
+            tree,
+            parent,
+            &label,
+            Some(p.three_state_enable == Some(true)),
+            false,
+        );
+        if item != 0 {
+            nodes.insert(item, NodeRef::Leaf(p.id.clone()));
+            leaves.insert(p.id.clone(), item);
+        }
+    } else {
+        let label = format!("{} ({} 项)", p.name, state::count_project_leaves(p));
+        let item = controls::tree_insert(tree, parent, &label, None, true);
+        for c in &p.items {
+            insert_project(tree, item, c, nodes, leaves);
+        }
+    }
+}
+
+pub unsafe fn rebuild_services(app: &mut App) {
+    let tree = app.ui.services_tree;
+    if tree.is_null() {
+        return;
+    }
+    controls::tree_clear(tree);
+    app.services_leaves.clear();
+    for g in &app.groups {
+        let group_item = controls::tree_insert(tree, TVI_ROOT, &g.name, None, true);
+        if group_item == 0 {
+            continue;
+        }
+        for p in &g.items {
+            insert_service_leaves(tree, group_item, p, &mut app.services_leaves);
+        }
+    }
+}
+
+unsafe fn insert_service_leaves(
+    tree: HWND,
+    parent: HTREEITEM,
+    p: &AccelerateProject,
+    leaves: &mut HashMap<String, HTREEITEM>,
+) {
+    if p.items.is_empty() {
+        let item = controls::tree_insert(
+            tree,
+            parent,
+            &p.name,
+            Some(p.three_state_enable == Some(true)),
+            false,
+        );
+        if item != 0 {
+            leaves.insert(p.id.clone(), item);
+        }
+    } else {
+        for c in &p.items {
+            insert_service_leaves(tree, parent, c, leaves);
+        }
+    }
+}
+
+pub unsafe fn sync_checks(app: &mut App) {
+    let states = state::leaf_states(&app.groups);
+    for (id, item) in &app.platform_leaves {
+        if let Some(on) = states.get(id) {
+            controls::tree_set_check(app.ui.platform_tree, *item, *on);
+        }
+    }
+    for g in &app.groups {
+        if let Some(item) = app.platform_groups.get(&g.name) {
+            controls::tree_set_check(app.ui.platform_tree, *item, state::group_enabled(g));
+        }
+    }
+    for (id, item) in &app.services_leaves {
+        if let Some(on) = states.get(id) {
+            controls::tree_set_check(app.ui.services_tree, *item, *on);
+        }
+    }
+}
+
+pub unsafe fn on_platform_check(app: &mut App, item: HTREEITEM) {
+    // Consume the click on the first notification for this tree (selection,
+    // expansion or check) so a later programmatic notification cannot claim it.
+    let clicked = crate::take_tree_click(app.ui.platform_tree);
+    let Some(node) = app.platform_nodes.get(&item).cloned() else {
+        return;
+    };
+    let Some(ctrl) = controls::tree_check(app.ui.platform_tree, item) else {
+        return;
+    };
+    // Programmatic TVM_SETITEM notifications can arrive after the suppression
+    // guard has been dropped. If the control already agrees with the model this
+    // is not a user action, so it must not be applied again.
+    match node {
+        NodeRef::Group(name) => {
+            let model = app
+                .groups
+                .iter()
+                .find(|g| g.name == name)
+                .map(state::group_enabled);
+            if model == Some(ctrl) || !clicked {
+                return;
+            }
+            if state::set_group(&mut app.groups, &name, ctrl) {
+                commit(app);
+            }
+        }
+        NodeRef::Leaf(id) => {
+            let model = state::leaf_states(&app.groups).get(&id).copied();
+            if model == Some(ctrl) || !clicked {
+                return;
+            }
+            if state::set_leaf(&mut app.groups, &id, ctrl) {
+                commit(app);
             }
         }
     }
-    if let Some(name) = toggled {
-        let mut st = crate::pages::GLOBAL_ACC.lock().unwrap();
-        if st.collapsed.contains(&name) {
-            st.collapsed.remove(&name);
-        } else {
-            st.collapsed.insert(name);
-        }
-    }
 }
 
-/// True when every leaf project in the group is enabled.
-fn group_enabled(grp: &AccelerateProjectGroup) -> bool {
-    let mut all = true;
-    let mut any = false;
-    for p in &grp.items {
-        for leaf in p.all_leaves() {
-            any = true;
-            if leaf.three_state_enable != Some(true) {
-                all = false;
-            }
-        }
-    }
-    all && any
-}
-
-/// Total leaf count in a group.
-fn count_group_items(grp: &AccelerateProjectGroup) -> usize {
-    grp.items.iter().map(|p| p.all_leaves().len()).sum()
-}
-
-/// Total leaf count under a project (including itself when it is a leaf).
-fn count_group_leaves(proj: &AccelerateProject) -> usize {
-    if proj.items.is_empty() {
-        1
-    } else {
-        proj.items.iter().map(|c| count_group_leaves(c)).sum()
-    }
-}
-
-fn project_tree(app: &mut App, ui: &mut egui::Ui, proj: &AccelerateProject) {
-    if proj.items.is_empty() {
-        let label = format!("{} ({} 个域名)", proj.name, count_domains(&proj.listen_domain_names));
-        let mut on = proj.three_state_enable == Some(true);
-        if ui.checkbox(&mut on, &label).changed() {
-            set_project_enable(app, &proj.id, on);
-        }
-    } else {
-        egui::CollapsingHeader::new(format!("{} ({} 项)", proj.name, count_group_leaves(proj)))
-            .id_salt(proj.id.clone())
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.indent(proj.id.clone(), |ui| {
-                    for child in &proj.items {
-                        project_tree(app, ui, child);
-                    }
-                });
-            });
-    }
-}
-
-fn count_domains(s: &str) -> usize {
-    s.split(';').map(|x| x.trim()).filter(|x| !x.is_empty()).count()
-}
-
-fn set_group_enable(app: &mut App, name: &str, on: bool) {
-    let mut groups = app.accel.groups();
-    if let Some(g) = groups.iter_mut().find(|g| &g.name == name) {
-        g.three_state_enable = Some(on);
-        for p in g.items.iter_mut() {
-            let set: HashSet<String> = if on {
-                p.all_leaves().iter().map(|l| l.id.clone()).collect()
-            } else {
-                HashSet::new()
-            };
-            p.restore_enable(&set);
-        }
-    }
-    commit_groups(app, groups);
-}
-
-fn set_project_enable(app: &mut App, id: &str, on: bool) {
-    let mut groups = app.accel.groups();
-    let mut found = false;
-    for g in groups.iter_mut() {
-        if set_leaf(&mut g.items, id, on) {
-            found = true;
-        }
-    }
-    if found {
-        commit_groups(app, groups);
-    }
-}
-
-fn set_leaf(items: &mut [AccelerateProject], id: &str, on: bool) -> bool {
-    for p in items.iter_mut() {
-        if p.id == id {
-            p.three_state_enable = Some(on);
-            return true;
-        }
-        if set_leaf(&mut p.items, id, on) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Commit checkbox changes back into the service (via enabled IDs).
-fn commit_groups(app: &mut App, groups: Vec<AccelerateProjectGroup>) {
-    let ids: Vec<String> = groups
+pub unsafe fn on_service_check(app: &mut App, item: HTREEITEM) {
+    let clicked = crate::take_tree_click(app.ui.services_tree);
+    let Some(id) = app
+        .services_leaves
         .iter()
-        .flat_map(|g| g.items.iter().flat_map(|p| p.enabled_ids()))
-        .collect();
+        .find_map(|(id, h)| (*h == item).then(|| id.clone()))
+    else {
+        return;
+    };
+    let Some(ctrl) = controls::tree_check(app.ui.services_tree, item) else {
+        return;
+    };
+    let model = state::leaf_states(&app.groups).get(&id).copied();
+    if model == Some(ctrl) || !clicked {
+        return;
+    }
+    if state::set_leaf(&mut app.groups, &id, ctrl) {
+        commit(app);
+    }
+}
+
+fn commit(app: &mut App) {
+    let ids = state::enabled_ids(&app.groups);
     app.accel.apply_enabled(&ids);
+    unsafe { sync_checks(app) };
 }
 
-fn services_tab(app: &mut App, ui: &mut egui::Ui) {
-    let groups = app.accel.groups();
-    for grp in &groups {
-        ui.strong(&grp.name);
-        for proj in &grp.items {
-            for leaf in proj.all_leaves() {
-                let mut on = leaf.three_state_enable == Some(true);
-                if ui.checkbox(&mut on, &leaf.name).changed() {
-                    set_project_enable(app, &leaf.id, on);
-                }
-            }
-        }
-    }
+pub unsafe fn refresh_logs(app: &mut App) {
+    let text = state::logs_text(&app.logs);
+    win32::set_text(app.ui.logs_edit, &text);
+    app.logs_dirty = false;
 }
 
-fn scripts_tab(app: &mut App, ui: &mut egui::Ui) {
-    ui.heading("加速脚本");
-    let mut on = app.settings.proxy.is_enable_script;
-    if ui.checkbox(&mut on, "启用加速脚本").changed() {
-        app.settings.proxy.is_enable_script = on;
-        let _ = app.settings.save();
-    }
-    ui.label("加速脚本用于自定义域名匹配与转发规则。当前版本提供基础开关。");
-}
-
-fn logs_tab(app: &mut App, ui: &mut egui::Ui) {
-    crate::pages::hrow(ui, |ui| {
-        if ui.button("清空").clicked() {
-            app.logs.clear();
-        }
-        ui.label("代理日志（最新 1000 条）");
-    });
-    egui::Frame::default()
-        .fill(egui::Color32::from_rgb(20, 20, 20))
-        .show(ui, |ui| {
-            let mut text = String::new();
-            for line in app.logs.iter().rev().take(500) {
-                text.push_str(line);
-                text.push('\n');
-            }
-            ui.monospace(if text.is_empty() { "(空)" } else { &text });
-        });
-}
-
-fn traffic_tab(app: &mut App, ui: &mut egui::Ui) {
+pub unsafe fn refresh_traffic(app: &mut App) {
     let stats = app.proxy.stats();
-    let s = stats.lock().unwrap();
-    ui.label(format!("总流量: {} 字节", s.total_bytes));
-    ui.add_space(6.0);
-    for (d, b) in s.by_domain.iter() {
-        crate::pages::hrow(ui, |ui| {
-            ui.monospace(d);
-            ui.label(format!("{} 字节", b));
-        });
+    let (total, rows) = {
+        let s = stats.lock().unwrap();
+        state::traffic_snapshot(s.total_bytes, &s.by_domain)
+    };
+    if total == app.traffic_total && rows == app.traffic_rows {
+        return;
+    }
+    app.traffic_total = total;
+    app.traffic_rows = rows.clone();
+    win32::set_text(app.ui.traffic_total, &format!("总流量: {total} 字节"));
+    controls::list_clear(app.ui.traffic_list);
+    for (domain, bytes) in rows {
+        controls::list_add(app.ui.traffic_list, &[domain, bytes.to_string()], 0);
     }
 }
 
-fn net_test_tab(_app: &mut App, ui: &mut egui::Ui) {
-    crate::pages::hrow(ui, |ui| {
-        let testing = crate::pages::GLOBAL_ACC.lock().unwrap().testing;
-        let label = if testing { "检测中…" } else { "开始检测" };
-        if ui.add_enabled(!testing, egui::Button::new(label)).clicked() {
-            {
-                let mut st = crate::pages::GLOBAL_ACC.lock().unwrap();
-                st.testing = true;
-            }
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                rt.block_on(async move {
-                    let mut results = Vec::new();
-                    results.push(wtlite_core::nettest::check_nat().await);
-                    results.push(wtlite_core::nettest::check_doh(
-                        "Tencent DoH",
-                        wtlite_core::dns::dns_const::DNS_ALI_DOH,
-                    )
-                    .await);
-                    results.push(wtlite_core::nettest::check_doh(
-                        "DNSPod DoH",
-                        wtlite_core::dns::dns_const::DNSPOD_DOH,
-                    )
-                    .await);
-                    results.push(wtlite_core::nettest::check_doh(
-                        "Google DoH",
-                        wtlite_core::dns::dns_const::GOOGLE_DOH,
-                    )
-                    .await);
-                    results.push(wtlite_core::nettest::check_ipv6().await);
-                    results.push(
-                        wtlite_core::nettest::check_domain(
-                            "域名连接",
-                            wtlite_core::nettest::default_test_domain(),
-                        )
-                        .await,
-                    );
-                    let mut st = crate::pages::GLOBAL_ACC.lock().unwrap();
-                    st.net_test_results = results;
-                    st.testing = false;
-                });
-            });
-        }
-    });
-    ui.add_space(6.0);
-    let results = crate::pages::GLOBAL_ACC.lock().unwrap().net_test_results.clone();
-    for r in &results {
-        crate::pages::hrow(ui, |ui| {
-            let color = match r.color {
-                wtlite_core::nettest::TestColor::Green => egui::Color32::from_rgb(80, 200, 80),
-                wtlite_core::nettest::TestColor::Orange => egui::Color32::from_rgb(255, 180, 60),
-                wtlite_core::nettest::TestColor::Red => egui::Color32::from_rgb(255, 90, 90),
-            };
-            ui.colored_label(color, "●");
-            ui.strong(&r.name);
-            ui.label(&r.detail);
-        });
+pub unsafe fn refresh_nettest(app: &mut App) {
+    controls::list_clear(app.ui.nettest_list);
+    for r in &app.net_results {
+        let color = match r.color {
+            wtlite_core::nettest::TestColor::Green => 0,
+            wtlite_core::nettest::TestColor::Orange => 1,
+            wtlite_core::nettest::TestColor::Red => 2,
+        };
+        controls::list_add(
+            app.ui.nettest_list,
+            &[r.name.clone(), r.detail.clone()],
+            color,
+        );
     }
-    if results.is_empty() {
-        ui.label("点击“开始检测”运行网络诊断。");
+    let active = app.main_tab == crate::types::MainTab::Accelerator
+        && app.acc_tab == crate::types::AccTab::NetTest;
+    win32::set_visible(app.ui.nettest_hint, active && app.net_results.is_empty());
+    refresh_nettest_button(app);
+}
+
+pub unsafe fn refresh_nettest_button(app: &mut App) {
+    win32::set_text(
+        app.ui.nettest_start,
+        if app.testing { "检测中…" } else { "开始检测" },
+    );
+    win32::set_enabled(app.ui.nettest_start, !app.testing);
+}
+
+pub fn start_nettest(app: &mut App) {
+    if app.testing {
+        return;
+    }
+    app.testing = true;
+    unsafe { refresh_nettest_button(app) };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.test_rx = Some(rx);
+    std::thread::spawn(move || {
+        use wtlite_core::nettest;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let results = match rt {
+            Ok(rt) => rt.block_on(async move {
+                let mut results = Vec::new();
+                results.push(nettest::check_nat().await);
+                results.push(nettest::check_doh("Tencent DoH", wtlite_core::dns::dns_const::DNS_ALI_DOH).await);
+                results.push(nettest::check_doh("DNSPod DoH", wtlite_core::dns::dns_const::DNSPOD_DOH).await);
+                results.push(nettest::check_doh("Google DoH", wtlite_core::dns::dns_const::GOOGLE_DOH).await);
+                results.push(nettest::check_ipv6().await);
+                results.push(nettest::check_domain("域名连接", nettest::default_test_domain()).await);
+                results
+            }),
+            Err(e) => vec![nettest::TestResult {
+                name: "网络检测".to_string(),
+                detail: format!("初始化失败: {e}"),
+                color: nettest::TestColor::Red,
+                latency_ms: None,
+            }],
+        };
+        let _ = tx.send(results);
+    });
+}
+
+pub unsafe fn update_mode_combo(app: &mut App) {
+    let idx = state::mode_index(app.settings.proxy.proxy_mode);
+    win32::set_combo_sel(app.ui.mode_combo, idx);
+}
+
+pub fn test_result_color(lparam: isize) -> u32 {
+    match lparam {
+        0 => win32::rgb(0, 140, 0),
+        1 => win32::rgb(190, 110, 0),
+        _ => win32::rgb(200, 50, 50),
     }
 }

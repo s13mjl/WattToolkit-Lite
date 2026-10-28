@@ -1,7 +1,8 @@
 //! Data models mirroring the original WattToolkit accelerator project DTOs.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
+use std::net::IpAddr;
 
 /// Proxy acceleration modes (mirrors original ProxyMode enum, Windows subset).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +120,14 @@ pub struct AccelerateProject {
     /// Forward/destination domain (optional).
     #[serde(default)]
     pub forward_domain_names: Option<String>,
+    /// Upstream addresses configured by the manifest (original
+    /// `ReverseProxyConfig.IPAddress`): offered ahead of the resolved DNS
+    /// answers, so a reachable address for a blocked domain can be pinned
+    /// without rebuilding the program. Only the order changes - every address is
+    /// still validated by the TLS handshake, so a wrong one is skipped like any
+    /// other failing candidate.
+    #[serde(default, deserialize_with = "de_ip_list")]
+    pub ip_address: Vec<IpAddr>,
     #[serde(default)]
     pub ignore_ssl_cert_verification: bool,
     /// Fake TLS SNI (optional).
@@ -136,6 +145,38 @@ pub struct AccelerateProject {
     pub items: Vec<AccelerateProject>,
 }
 
+/// Tolerant deserializer for the manifest's address field.
+///
+/// The field comes from the official microservice and has been seen in several
+/// shapes (absent, `null`, an empty string, a single address, a list of
+/// addresses), so a strict parser would make the *whole* manifest fail to load
+/// and silently fall back to the built-in list. Every shape is accepted here and
+/// unparsable entries are dropped: this function never fails.
+fn de_ip_list<'de, D>(de: D) -> Result<Vec<IpAddr>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    fn parse(text: &str) -> Vec<IpAddr> {
+        text.split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+            .filter_map(|t| t.trim().parse::<IpAddr>().ok())
+            .collect()
+    }
+    Ok(match Option::<serde_json::Value>::deserialize(de).unwrap_or(None) {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::String(s)) => parse(&s),
+        Some(serde_json::Value::Number(n)) => parse(&n.to_string()),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .flat_map(|item| match item {
+                serde_json::Value::String(s) => parse(s),
+                serde_json::Value::Number(n) => parse(&n.to_string()),
+                _ => Vec::new(),
+            })
+            .collect(),
+        Some(_) => Vec::new(),
+    })
+}
+
 impl Default for AccelerateProject {
     fn default() -> Self {
         Self {
@@ -145,6 +186,7 @@ impl Default for AccelerateProject {
             proxy_type: ProxyType::Normal,
             match_domain_names: String::new(),
             forward_domain_names: None,
+            ip_address: Vec::new(),
             ignore_ssl_cert_verification: false,
             fake_server_name: None,
             listen_domain_names: String::new(),

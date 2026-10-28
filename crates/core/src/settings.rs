@@ -36,6 +36,16 @@ pub struct ProxySettings {
     pub use_doh: bool,
     pub custom_doh_address: String,
     pub enable_http_proxy_to_https: bool,
+    /// Whether the proxy may terminate TLS locally (decrypt) instead of passing
+    /// the connection through as a bare tunnel. Read once at startup, so a change
+    /// takes effect from the next start. Defaults to `true`, i.e. the behavior
+    /// before the switch existed: a settings file written without this field must
+    /// still read as "on", otherwise an upgrade would silently stop decrypting.
+    ///
+    /// Not every listener asks it: the `Hosts` mode's 443 listener decrypts
+    /// unconditionally (its mechanism is "name -> 127.0.0.1 -> decrypt"), which is
+    /// a registered legacy, so this switch does not reach it.
+    pub enable_tls_decryption: bool,
     pub only_enable_proxy_script: bool,
     pub program_startup_run_proxy: bool,
     pub is_enable_script: bool,
@@ -59,6 +69,7 @@ impl Default for ProxySettings {
             use_doh: true,
             custom_doh_address: String::new(),
             enable_http_proxy_to_https: true,
+            enable_tls_decryption: true,
             only_enable_proxy_script: false,
             program_startup_run_proxy: false,
             is_enable_script: true,
@@ -132,4 +143,26 @@ pub fn set_auto_run_on_startup(enable: bool) -> Result<(), String> {
         let _ = run.delete_value(AUTO_RUN_VALUE);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    /// The switch must *default to the current behavior*. A settings file written
+    /// before the field existed (every install upgraded from an earlier build) has
+    /// to read as "on", otherwise the upgrade would silently stop decrypting - the
+    /// switch would lie about the behavior it reports.
+    #[test]
+    fn a_settings_file_that_predates_the_decryption_switch_reads_it_as_on() {
+        // No `proxy` object at all, and an object carrying other `ProxySettings`
+        // fields but not this one: both are shapes an older install can have.
+        let empty: Settings = serde_json::from_str("{}").unwrap();
+        assert!(empty.proxy.enable_tls_decryption);
+        let partial: Settings =
+            serde_json::from_str(r#"{"proxy":{"proxy_master_dns":"223.5.5.5"}}"#).unwrap();
+        assert!(partial.proxy.enable_tls_decryption);
+        // And the same value is what a fresh install (no file) starts from.
+        assert!(Settings::default().proxy.enable_tls_decryption);
+    }
 }

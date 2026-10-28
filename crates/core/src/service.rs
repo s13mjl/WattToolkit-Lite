@@ -43,17 +43,37 @@ impl AccelerateService {
     }
 
     /// Load groups: local cache first, then built-in.
+    ///
+    /// Every reason the cache is not used is logged: a cache that cannot be read,
+    /// cannot be parsed, or parses to nothing used to be dropped without a trace,
+    /// which left the user with the built-in list and no hint about why the
+    /// manifest had no effect.
     pub async fn load(&self) -> Result<Vec<AccelerateProjectGroup>, String> {
         // 1. Local cache.
         let path = paths::local_accelerate_path();
         if path.exists() {
-            if let Ok(bytes) = tokio::fs::read(&path).await {
-                if let Ok(groups) = serde_json::from_slice::<Vec<AccelerateProjectGroup>>(&bytes) {
-                    if !groups.is_empty() {
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => match serde_json::from_slice::<Vec<AccelerateProjectGroup>>(&bytes) {
+                    Ok(groups) if !groups.is_empty() => {
                         self.store(groups.clone(), "local cache");
                         return Ok(groups);
                     }
-                }
+                    Ok(_) => log::warn!(
+                        target: "wtlite_core::service",
+                        "加速清单 {} 解析结果为空，改用内置清单",
+                        path.display()
+                    ),
+                    Err(e) => log::warn!(
+                        target: "wtlite_core::service",
+                        "加速清单 {} 解析失败（{e}），改用内置清单",
+                        path.display()
+                    ),
+                },
+                Err(e) => log::warn!(
+                    target: "wtlite_core::service",
+                    "加速清单 {} 读取失败（{e}），改用内置清单",
+                    path.display()
+                ),
             }
         }
         // 2. Built-in fallback.
@@ -62,17 +82,33 @@ impl AccelerateService {
         Ok(groups)
     }
 
-    /// Synchronous variant used by the UI at startup (std::fs read).
+    /// Synchronous variant used by the UI at startup (std::fs read). Logs the
+    /// same three failures as [`Self::load`].
     pub fn load_sync(&self) -> Result<Vec<AccelerateProjectGroup>, String> {
         let path = paths::local_accelerate_path();
         if path.exists() {
-            if let Ok(bytes) = std::fs::read(&path) {
-                if let Ok(groups) = serde_json::from_slice::<Vec<AccelerateProjectGroup>>(&bytes) {
-                    if !groups.is_empty() {
+            match std::fs::read(&path) {
+                Ok(bytes) => match serde_json::from_slice::<Vec<AccelerateProjectGroup>>(&bytes) {
+                    Ok(groups) if !groups.is_empty() => {
                         self.store(groups.clone(), "local cache");
                         return Ok(groups);
                     }
-                }
+                    Ok(_) => log::warn!(
+                        target: "wtlite_core::service",
+                        "加速清单 {} 解析结果为空，改用内置清单",
+                        path.display()
+                    ),
+                    Err(e) => log::warn!(
+                        target: "wtlite_core::service",
+                        "加速清单 {} 解析失败（{e}），改用内置清单",
+                        path.display()
+                    ),
+                },
+                Err(e) => log::warn!(
+                    target: "wtlite_core::service",
+                    "加速清单 {} 读取失败（{e}），改用内置清单",
+                    path.display()
+                ),
             }
         }
         let groups = data::built_in_groups();

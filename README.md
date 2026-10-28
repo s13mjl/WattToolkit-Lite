@@ -18,14 +18,15 @@ WattToolkit-Lite 是一个使用 Rust 重写 [WattToolkit (Steam++)](https://git
 
 - **网络加速**（复现原项目逻辑）
   - 四种加速模式：**Hosts 文件**（默认）、**DNS 拦截**（WinDivert）、**PAC 代理**、**系统代理**
-  - 本地反向代理：Hosts / DNS 拦截模式下监听 443 端口，MITM 解密后转发到真实上游（按 SNI 动态签发叶子证书）
-  - 系统代理 / PAC 模式：正向代理（CONNECT 隧道 + 绝对 URI 转发），加速域名按自定义 DNS/DoH 解析
+  - 本地反向代理：Hosts 模式监听 443 端口，MITM 解密后转发到真实上游（按 SNI 动态签发叶子证书）；DNS 拦截模式同样监听 443，但仅在根证书已被系统信任时本地解密，否则退回裸中继（按 ClientHello 的 SNI 拨号，端到端 TLS）
+  - PAC / 系统代理模式：CONNECT 到 TLS 且根证书已被系统信任时同样在本地解密后转发（上游 SNI 可控、按端点回退），否则退回裸 TCP 隧道（`ForwardDestination` 别名仍优先拨号）
+  - 系统代理 / PAC 模式：正向代理（CONNECT 隧道 + 绝对 URI 转发），加速域名优先拨号清单 `ipAddress` 配置的上游地址，再按自定义 DNS/DoH 解析
   - 加速项目数据：**Steam 服务**、**Github**（对齐官方客户端的加速清单）
 - **证书管理**：生成 / 安装 / 删除 / 查看本地根证书（WattToolkit-Lite Certificate，有效期 300 天，ECDSA P-256）
 - **Hosts 管理**：编辑 / 重置 / 打开，使用独立的 WattToolkit-Lite 标记块，不与原程序冲突
 - **网络检测**：NAT、DoH 延迟（阿里云 / DNSPod / Google）、IPv6、默认域名连接测试（绿/橙/红 三级）
-- **设置**：通用（开机自启、托盘、GPU）/ 加速（默认模式、二级代理等）/ 关于
-- **系统托盘**：点击窗口关闭按钮最小化到托盘（加速继续运行），托盘单击 / 双击 / 菜单均可恢复窗口
+- **设置**：通用（开机自启、启动时最小化、显示托盘图标、GPU）/ 加速（默认模式、二级代理等）/ 关于
+- **系统托盘**：点击窗口关闭按钮隐藏到托盘（加速继续运行），托盘单击 / 双击 / 菜单均可恢复窗口；关闭“显示托盘图标”后关闭窗口将直接退出
 - 代理日志、流量统计
 
 ## 与原项目的差异（按需求裁剪）
@@ -39,16 +40,18 @@ WattToolkit-Lite 是一个使用 Rust 重写 [WattToolkit (Steam++)](https://git
 | 关于页 | 仅保留：版本号、软件名、图标（原图标更换色调）、许可证、两个链接 |
 | 平台 | 仅 Windows |
 | 根证书密钥 | ECDSA P-256（原为 RSA 2048；浏览器同样信任） |
-| HTTP 版本 | HTTP/1.1（未复现 HTTP/2/3） |
+| HTTP 版本 | 客户端到本地 MITM 支持 HTTP/2（ALPN h2，HTTP/1.1 回退）；上游仍为 HTTP/1.1（HTTP/2 上游与 HTTP/3 未复现） |
 | 加速项目数据 | 离线内置（原为服务器 API + 登录）；优先读取本地缓存 LOCAL_ACCELERATE.json，缺失时使用内置清单 |
 | DNS 拦截驱动 | 缺失 WinDivert 时该模式提示不可用，其余三种模式正常（优雅降级） |
-| 界面框架 | eframe/egui（原为 Avalonia），内存占用更小 |
+| 界面框架 | 原生 Win32 公共控件 + GDI（原为 Avalonia，上一版为 eframe/egui）；无 GPU / WebView / UI 框架运行时，release 实测工作集约 16 MB、私有内存约 3 MB |
+| GPU 设置 | 设置项保留，但原生 GDI 渲染不使用 GPU |
+| 程序启动时自动运行加速 | 设置项保留，但不会在启动时自动开启（避免登录时意外改动 hosts / 系统代理） |
 
 ## 构建
 
 要求：Rust 工具链（MSVC，已验证 rustc 1.98.0）。
 
-UI 使用 eframe/egui 0.29.1；exe 图标通过 `build.rs` + `app.rc`（embed-resource）在编译期嵌入，无需安装 Windows SDK 的 rc.exe。
+UI 使用原生 Win32 公共控件 + GDI（windows-sys），不依赖 egui/eframe、GPU 或 WebView；exe 图标、应用清单（Common Controls v6 + system DPI）通过 `build.rs` + `app.rc`（embed-resource）在编译期嵌入，无需安装 Windows SDK 的 rc.exe。
 
 release 构建使用 Windows GUI 子系统，启动不会弹出控制台窗口；运行日志写入
 `%LOCALAPPDATA%\WattToolkit-Lite\logs\app.log`。
@@ -66,7 +69,7 @@ cargo build --release
 - 应用数据目录：`%LOCALAPPDATA%\WattToolkit-Lite`（设置、证书、缓存、日志）。
 - **Hosts 模式**需要管理员权限（监听 443 + 修改 hosts 文件）；首次使用需安装证书（右侧面板“安装证书”，需管理员）。
 - **DNS 拦截模式**需要管理员权限 + WinDivert 驱动；驱动缺失时该模式会给出明确提示，其他模式不受影响。
-- **系统代理 / PAC 模式**只写 HKCU 注册表，无需管理员。
+- **系统代理 / PAC 模式**只写 HKCU 注册表，无需管理员；其 TLS 本地解密同样要求已安装根证书（未安装时自动退回裸隧道，仅在日志中提示 SNI 控制与上游证书校验不可用）。
 - 关闭窗口 = 最小化到托盘（加速继续运行）；退出请使用托盘右键菜单的“退出”。
 
 ## 关于页链接

@@ -329,12 +329,62 @@ pub fn create_pac(proxy_host: &str, domains: &[String]) -> String {
         if d.is_empty() {
             continue;
         }
-        sb.push_str(&format!("    if (shExpMatch(host, '{}')) return pac;
-", d));
+        // `shExpMatch(host, 'x.com')` matches ONLY the bare domain, and
+        // `shExpMatch(host, '*.x.com')` does not match `x.com` either. The
+        // original wrote each pattern through as-is, but its patterns came
+        // from `ReverseProxyConfig.GetDomainPatterns()` in `*.x.com` shape,
+        // so every entry covered its sub-domains. Our built-in list carries
+        // bare shapes ("githubusercontent.com", "github.com"), which here
+        // would have sent avatars/raw/objects.githubusercontent.com,
+        // gist.github.com and codeload.github.com DIRECT - into a poisoned
+        // resolver (real-machine symptom: the page skeleton loads, every
+        // sub-domain resource fails). So every pattern is expanded to both
+        // forms, matching the original's effective coverage.
+        let base = d.strip_prefix("*.").filter(|b| !b.is_empty()).unwrap_or(d);
+        let star = if base.len() == d.len() {
+            format!("*.{d}")
+        } else {
+            d.to_string()
+        };
+        sb.push_str(&format!(
+            "    if (shExpMatch(host,'{base}') || shExpMatch(host,'{star}')) return pac;\n"
+        ));
     }
     sb.push_str("    return 'DIRECT';
 ");
     sb.push_str("}
 ");
     sb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_pac;
+
+    #[test]
+    fn pac_keeps_wildcard_patterns() {
+        let domains = vec![
+            "*.st.dl.eccdnx.com".to_string(),
+            "store.steampowered.com".to_string(),
+        ];
+        assert_eq!(
+            create_pac("127.0.0.1:26561", &domains),
+            "function FindProxyForURL(url, host){\n    var pac = 'PROXY 127.0.0.1:26561';\n    if (shExpMatch(host,'st.dl.eccdnx.com') || shExpMatch(host,'*.st.dl.eccdnx.com')) return pac;\n    if (shExpMatch(host,'store.steampowered.com') || shExpMatch(host,'*.store.steampowered.com')) return pac;\n    return 'DIRECT';\n}\n"
+        );
+    }
+
+    #[test]
+    fn bare_domain_patterns_cover_subdomains() {
+        // The built-in GitHub list carries bare shapes ("githubusercontent.com").
+        // The PAC must route avatars/raw/objects.githubusercontent.com through
+        // the proxy all the same: they carry every avatar and image on a GitHub
+        // page, and a DIRECT answer sends them into a poisoned resolver - the
+        // real-machine symptom "page skeleton loads, everything else fails".
+        let domains = vec!["githubusercontent.com".to_string(), "github.com".to_string()];
+        let pac = create_pac("127.0.0.1:26561", &domains);
+        assert!(pac.contains("shExpMatch(host,'githubusercontent.com')"), "{pac}");
+        assert!(pac.contains("shExpMatch(host,'*.githubusercontent.com')"), "{pac}");
+        assert!(pac.contains("shExpMatch(host,'github.com')"), "{pac}");
+        assert!(pac.contains("shExpMatch(host,'*.github.com')"), "{pac}");
+    }
 }

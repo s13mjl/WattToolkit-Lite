@@ -5,6 +5,7 @@
 //! System/PAC modes, WinDivert DNS interception, certificate management,
 //! Hosts file and system-proxy registry control, and network diagnostics.
 
+pub mod agent;
 pub mod cert;
 pub mod data;
 pub mod dns;

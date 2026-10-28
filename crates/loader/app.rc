@@ -5,6 +5,9 @@
 
 1 ICON "../../assets/wattoolkit-lite.ico"
 
+// Common Controls v6 (themed controls) + system DPI awareness.
+1 24 "app.manifest"
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,0,0,0
 PRODUCTVERSION 1,0,0,0
