@@ -1,0 +1,36 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build & test (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2.9.3
+
+      - name: Check formatting
+        # 仓库历史提交还没做过 rustfmt，先把格式问题当作提示而不是阻塞构建。
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Tests
+        run: cargo test --workspace --locked

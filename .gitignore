@@ -4,6 +4,11 @@ WinDivert*.sys
 WinDivert*.lib
 WinDivert*.h
 
+# The packaged copies are the exception: CI cannot download them, so the
+# release build takes them from here.
+!vendor/windivert/WinDivert.dll
+!vendor/windivert/WinDivert64.sys
+
 # Scratch scripts used while debugging (never part of the source tree)
 /_*.ps1
 /_*.cmd

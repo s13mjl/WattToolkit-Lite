@@ -1,0 +1,97 @@
+# SLSA3 provenance for the Windows release bundles.
+#
+# Tag pushes only: the generator signs the build using the workflow's identity,
+# which is only non-forgeable while the inputs come from a ref that contributors
+# cannot rewrite from a fork.
+name: SLSA generic generator
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build release artifacts
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      # If GitHub masks this as a possible secret, switch to the
+      # create-base64-subjects-from-file action and base64-subjects-as-file.
+      hashes: ${{ steps.digests.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2.9.3
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Stage bundle
+        run: |
+          New-Item -ItemType Directory -Force staging, dist | Out-Null
+          Copy-Item target/release/wattoolkit-lite.exe staging/
+          # The DNS interception mode needs the driver next to the exe.
+          Copy-Item vendor/windivert/WinDivert.dll, vendor/windivert/WinDivert64.sys staging/
+          Copy-Item target/release/wattoolkit-lite.exe dist/
+
+      - name: Zip bundle
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          Compress-Archive -Path staging/* -DestinationPath "dist/WattToolkit-Lite-$version-win-x64.zip"
+
+      - name: Digests
+        id: digests
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # The generator wants sha256sum's own format, base64 encoded on one line.
+          echo "hashes=$(sha256sum wattoolkit-lite.exe WattToolkit-Lite-*-win-x64.zip | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: bins-windows-x64
+          path: |
+            dist/wattoolkit-lite.exe
+            dist/WattToolkit-Lite-*-win-x64.zip
+          if-no-files-found: error
+          retention-days: 5
+
+  provenance:
+    name: Generate provenance
+    needs: [build]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.hashes }}
+      upload-assets: true
+      provenance-name: WattToolkit-Lite.intoto.jsonl
+
+  release:
+    name: Attach binaries to the release
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: bins-windows-x64
+          path: dist
+
+      - uses: softprops/action-gh-release@v3.0.3
+        with:
+          files: |
+            dist/wattoolkit-lite.exe
+            dist/WattToolkit-Lite-*-win-x64.zip
