@@ -5,21 +5,13 @@ pub mod settings;
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::HFONT;
-use windows_sys::Win32::System::SystemServices::{
-    SS_CENTER, SS_CENTERIMAGE, SS_LEFT, SS_NOTIFY,
-};
+use windows_sys::Win32::System::SystemServices::{SS_CENTER, SS_CENTERIMAGE, SS_LEFT, SS_NOTIFY};
 use windows_sys::Win32::UI::Controls;
 use windows_sys::Win32::UI::WindowsAndMessaging as wm;
 
 use crate::win32::{create_control, Rect};
 
-pub unsafe fn label(
-    parent: HWND,
-    text: &str,
-    style: u32,
-    id: i32,
-    font: HFONT,
-) -> HWND {
+pub unsafe fn label(parent: HWND, text: &str, style: u32, id: i32, font: HFONT) -> HWND {
     create_control(
         parent,
         Controls::WC_STATICW,
@@ -94,7 +86,14 @@ pub unsafe fn combo(parent: HWND, id: i32, font: HFONT, editable: bool) -> HWND 
     )
 }
 
-pub unsafe fn edit(parent: HWND, text: &str, id: i32, font: HFONT, multiline: bool, read_only: bool) -> HWND {
+pub unsafe fn edit(
+    parent: HWND,
+    text: &str,
+    id: i32,
+    font: HFONT,
+    multiline: bool,
+    read_only: bool,
+) -> HWND {
     let mut style = wm::ES_AUTOHSCROLL as u32 | wm::WS_TABSTOP;
     if multiline {
         style = wm::ES_MULTILINE as u32 | wm::ES_AUTOVSCROLL as u32 | wm::WS_VSCROLL;

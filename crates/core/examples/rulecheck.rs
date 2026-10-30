@@ -7,13 +7,17 @@ fn main() {
             for leaf in proj.all_leaves() {
                 for d in leaf.listen_domain_names.split(';') {
                     let d = d.trim();
-                    if d.contains("steamcommunity") { found.push(format!("{d}  (group={}, leaf={})", grp.name, leaf.id)); }
+                    if d.contains("steamcommunity") {
+                        found.push(format!("{d}  (group={}, leaf={})", grp.name, leaf.id));
+                    }
                 }
             }
         }
     }
     println!("=== my domains containing 'steamcommunity' ===");
-    for f in &found { println!("  {f}"); }
+    for f in &found {
+        println!("  {f}");
+    }
     println!();
     println!("=== shExpMatch semantics check (does 'steamcommunity.com' match subdomains?) ===");
     // shExpMatch(host, 'steamcommunity.com') matches ONLY the exact host

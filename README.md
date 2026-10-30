@@ -63,13 +63,15 @@ cargo build --release
 - 可执行文件：`target\release\wattoolkit-lite.exe`
 - 若希望构建产物放到临时目录便于清理，可设置 `CARGO_TARGET_DIR=%TEMP%\WattToolkit-Lite-target`。
 - 将 `WinDivert.dll`（及配套 `WinDivert64.sys`）放在 exe 同目录，DNS 拦截模式才可用。
+- 程序清单要求管理员权限：双击/`Start-Process` 会触发 UAC；在未提权的终端里直接 `cargo run` 或执行 exe 会得到 `os error 740`，请从提权终端运行或双击后确认 UAC。
 
 ## 运行说明
 
 - 应用数据目录：`%LOCALAPPDATA%\WattToolkit-Lite`（设置、证书、缓存、日志）。
-- **Hosts 模式**需要管理员权限（监听 443 + 修改 hosts 文件）；首次使用需安装证书（右侧面板“安装证书”，需管理员）。
+- 程序清单为 `requireAdministrator`（与原版 AppHost 一致），启动时会请求管理员权限（UAC）；否则写入系统 hosts 会以 `os error 5（拒绝访问）` 失败。
+- **Hosts 模式**需要管理员权限（监听 443 + 修改 hosts 文件）；首次使用需安装证书（右侧面板“安装证书”）。
 - **DNS 拦截模式**需要管理员权限 + WinDivert 驱动；驱动缺失时该模式会给出明确提示，其他模式不受影响。
-- **系统代理 / PAC 模式**只写 HKCU 注册表，无需管理员；其 TLS 本地解密同样要求已安装根证书（未安装时自动退回裸隧道，仅在日志中提示 SNI 控制与上游证书校验不可用）。
+- **系统代理 / PAC 模式**本身只写 HKCU 注册表，但程序整体以管理员身份运行；其 TLS 本地解密同样要求已安装根证书（未安装时自动退回裸隧道，仅在日志中提示 SNI 控制与上游证书校验不可用）。
 - 关闭窗口 = 最小化到托盘（加速继续运行）；退出请使用托盘右键菜单的“退出”。
 
 ## 关于页链接

@@ -283,7 +283,9 @@ async fn dial_tunnel_upstream(host: &str, port: u16, rt: &FwdRuntime) -> Option<
             &cfg.custom_doh_address,
         )
         .await;
-        rt.send_log(format!("[TUNNEL] {dial_host} failed, retrying {host}: {ips:?}"));
+        rt.send_log(format!(
+            "[TUNNEL] {dial_host} failed, retrying {host}: {ips:?}"
+        ));
         let fallback: Vec<SocketAddr> = http1::candidate_endpoints(&[], port, &ips)
             .into_iter()
             .filter(|a| !addrs.contains(a))
@@ -711,16 +713,15 @@ pub(crate) fn agent_config(cfg: &ProxySettings) -> Option<AgentConfig> {
         );
         return None;
     }
-    let credentials = if cfg.two_level_agent_user.is_empty()
-        && cfg.two_level_agent_password.is_empty()
-    {
-        None
-    } else {
-        Some((
-            cfg.two_level_agent_user.clone(),
-            cfg.two_level_agent_password.clone(),
-        ))
-    };
+    let credentials =
+        if cfg.two_level_agent_user.is_empty() && cfg.two_level_agent_password.is_empty() {
+            None
+        } else {
+            Some((
+                cfg.two_level_agent_user.clone(),
+                cfg.two_level_agent_password.clone(),
+            ))
+        };
     Some(AgentConfig {
         proxy_type: cfg.two_level_agent_type,
         host,
@@ -947,7 +948,10 @@ mod tests {
         let mut domains = HashSet::new();
         domains.insert("*.pdx01.abs.hls.ttvnw.net".to_string());
         domains.insert("store.steampowered.com".to_string());
-        assert!(is_accelerated("video-edge-1.pdx01.abs.hls.ttvnw.net", &domains));
+        assert!(is_accelerated(
+            "video-edge-1.pdx01.abs.hls.ttvnw.net",
+            &domains
+        ));
         assert!(is_accelerated("store.steampowered.com", &domains));
         assert!(!is_accelerated("store.steamstatic.com", &domains));
         assert!(!is_accelerated("example.com", &domains));
@@ -1000,8 +1004,14 @@ mod tests {
     #[test]
     fn configured_ips_use_pattern_matching_and_manifest_order() {
         let table = vec![
-            ("*.example.com".to_string(), vec![IpAddr::from([1, 1, 1, 1])]),
-            ("sub.example.com".to_string(), vec![IpAddr::from([2, 2, 2, 2])]),
+            (
+                "*.example.com".to_string(),
+                vec![IpAddr::from([1, 1, 1, 1])],
+            ),
+            (
+                "sub.example.com".to_string(),
+                vec![IpAddr::from([2, 2, 2, 2])],
+            ),
         ];
         // A wildcard key covers the bare domain and every sub-domain, and the
         // manifest order decides: the first matching entry wins even when a more
@@ -1027,9 +1037,15 @@ mod tests {
         .collect();
         // A wildcard key covers the bare domain and every sub-domain ...
         assert_eq!(forward_for(&table, "example.com"), Some("cdn.example.net"));
-        assert_eq!(forward_for(&table, "www.example.com"), Some("cdn.example.net"));
+        assert_eq!(
+            forward_for(&table, "www.example.com"),
+            Some("cdn.example.net")
+        );
         // ... and an exact key wins over the wildcard that also matches it.
-        assert_eq!(forward_for(&table, "api.example.com"), Some("api.example.net"));
+        assert_eq!(
+            forward_for(&table, "api.example.com"),
+            Some("api.example.net")
+        );
         // Hosts without a configured alias are dialled directly.
         assert_eq!(forward_for(&table, "other.test"), None);
     }
@@ -1353,10 +1369,7 @@ mod tests {
                 let _ = sock.flush().await;
             }
         });
-        let configured = vec![(
-            "localhost.".to_string(),
-            vec![IpAddr::from([127, 0, 0, 1])],
-        )];
+        let configured = vec![("localhost.".to_string(), vec![IpAddr::from([127, 0, 0, 1])])];
         let answer = handle_http_with(
             ProxySettings::default(),
             HashSet::new(),
@@ -1390,7 +1403,10 @@ mod tests {
             answer.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
             "unexpected answer: {answer}"
         );
-        assert!(!answer.contains("via-agent"), "the agent was used: {answer}");
+        assert!(
+            !answer.contains("via-agent"),
+            "the agent was used: {answer}"
+        );
     }
 
     #[tokio::test]
@@ -1418,7 +1434,10 @@ mod tests {
             answer.starts_with("HTTP/1.1 200 OK\r\n"),
             "unexpected answer: {answer}"
         );
-        assert!(answer.contains("via-ip-addr"), "unexpected answer: {answer}");
+        assert!(
+            answer.contains("via-ip-addr"),
+            "unexpected answer: {answer}"
+        );
         fake.await.unwrap();
     }
 
@@ -1558,13 +1577,13 @@ mod tests {
             .await
             .unwrap();
         });
-        let configured = vec![(
-            "other.test".to_string(),
-            vec![IpAddr::from([127, 0, 0, 1])],
-        )];
+        let configured = vec![("other.test".to_string(), vec![IpAddr::from([127, 0, 0, 1])])];
         let target = format!("https://other.test:{upstream_port}/foo");
         let answer = proxy_response(false, false, false, configured, &target).await;
-        assert!(answer.contains("via-ip-addr"), "unexpected answer: {answer}");
+        assert!(
+            answer.contains("via-ip-addr"),
+            "unexpected answer: {answer}"
+        );
         fake.await.unwrap();
     }
 
@@ -1928,8 +1947,10 @@ mod tests {
 
     #[test]
     fn manifest_lookups_are_gated_by_only_enable_proxy_script() {
-        let ips: Vec<(String, Vec<IpAddr>)> =
-            vec![("*.example.com".to_string(), vec![IpAddr::from([1, 1, 1, 1])])];
+        let ips: Vec<(String, Vec<IpAddr>)> = vec![(
+            "*.example.com".to_string(),
+            vec![IpAddr::from([1, 1, 1, 1])],
+        )];
         let forward: std::collections::HashMap<String, String> =
             [("*.example.com".to_string(), "cdn.example.net".to_string())]
                 .into_iter()
@@ -2010,16 +2031,16 @@ mod tests {
             .await
             .unwrap();
         });
-        let configured = vec![(
-            "127.0.0.2".to_string(),
-            vec![IpAddr::from([127, 0, 0, 1])],
-        )];
+        let configured = vec![("127.0.0.2".to_string(), vec![IpAddr::from([127, 0, 0, 1])])];
         let target = format!("http://127.0.0.2:{upstream_port}/foo");
 
         // Default: `ReverseProxyConfig.IPAddress` applies and the request is
         // forwarded to the configured address.
         let answer = proxy_response(false, false, false, configured.clone(), &target).await;
-        assert!(answer.contains("via-ip-addr"), "unexpected answer: {answer}");
+        assert!(
+            answer.contains("via-ip-addr"),
+            "unexpected answer: {answer}"
+        );
         fake.await.unwrap();
 
         // `OnlyEnableProxyScript` on: the manifest lookup is skipped, so the
@@ -2114,8 +2135,9 @@ mod tests {
 
     /// A loopback DoH endpoint that answers every query for `host` with `ip`.
     async fn doh_stub(host: &'static str, ip: &'static str) -> String {
-        let body =
-            format!(r#"{{"Status":0,"Answer":[{{"name":"{host}","type":1,"TTL":60,"data":"{ip}"}}]}}"#);
+        let body = format!(
+            r#"{{"Status":0,"Answer":[{{"name":"{host}","type":1,"TTL":60,"data":"{ip}"}}]}}"#
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -2299,9 +2321,15 @@ mod tests {
         let (agent_addr, captured) = fake_http_agent(tls).await;
         let cfg = agent_enabled(agent_addr);
         assert!(
-            dial_upstream_tls(&cfg, &[], "upstream.test", 443, &crate::mitm::tls_connector())
-                .await
-                .is_none(),
+            dial_upstream_tls(
+                &cfg,
+                &[],
+                "upstream.test",
+                443,
+                &crate::mitm::tls_connector()
+            )
+            .await
+            .is_none(),
             "an upstream certificate outside the webpki roots was accepted over the agent"
         );
         // The tunnel itself was established, so the failure above is the
@@ -2315,11 +2343,15 @@ mod tests {
         // Unchanged for a disabled agent: the same untrusted upstream is dialled
         // directly and refused there too.
         let off = ProxySettings::default();
-        assert!(
-            dial_upstream_tls(&off, &[tls], "upstream.test", 443, &crate::mitm::tls_connector())
-                .await
-                .is_none()
-        );
+        assert!(dial_upstream_tls(
+            &off,
+            &[tls],
+            "upstream.test",
+            443,
+            &crate::mitm::tls_connector()
+        )
+        .await
+        .is_none());
     }
 }
 
@@ -2427,16 +2459,16 @@ async fn serve_pac(
     } else {
         host_hdr
     };
-    let pac = crate::sysproxy::create_pac(
-        &proxy_host,
-        &domains.iter().cloned().collect::<Vec<_>>(),
-    );
+    let pac =
+        crate::sysproxy::create_pac(&proxy_host, &domains.iter().cloned().collect::<Vec<_>>());
     let body = pac.as_bytes();
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Disposition: attachment;filename=proxy.pac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    tcp.write_all(head.as_bytes()).await.map_err(|e| e.to_string())?;
+    tcp.write_all(head.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     tcp.write_all(body).await.map_err(|e| e.to_string())?;
     tcp.flush().await.ok();
     Ok(())
@@ -2464,7 +2496,9 @@ async fn handle_http(
     // the connection being closed with nothing written.
     let Some(r) = rest else {
         let _ = tcp
-            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
             .await;
         return Ok(());
     };
@@ -2523,7 +2557,13 @@ async fn handle_http(
     // other host is dialled by name below (P2-9b), the same way the CONNECT path
     // answers an unmatched host, so the two paths finally agree.
     let ips = if accelerated {
-        dns::resolve_a(&host, &cfg.proxy_master_dns, cfg.use_doh, &cfg.custom_doh_address).await
+        dns::resolve_a(
+            &host,
+            &cfg.proxy_master_dns,
+            cfg.use_doh,
+            &cfg.custom_doh_address,
+        )
+        .await
     } else {
         Vec::new()
     };
@@ -2557,7 +2597,8 @@ async fn handle_http(
                 "[HTTP] {host}:{port} resolved to {system_ips:?}, answering 500 (DNS pollution guard)"
             ));
             // Same message (and same UTF-8 body) the original writes.
-            let body = format!("域名 {host} 可能已经被 DNS 污染，如果域名为本机域名，请解析为非回环 IP。");
+            let body =
+                format!("域名 {host} 可能已经被 DNS 污染，如果域名为本机域名，请解析为非回环 IP。");
             let head = format!(
                 "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain; charset=utf-8\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2605,8 +2646,13 @@ async fn handle_http(
             rt.send_log(format!(
                 "[HTTP] {host}:{port} is not in the manifest, dialling the system answer {system_ips:?}"
             ));
-            upstream = dial_upstream(&cfg, &http1::candidate_endpoints(&system_ips, port, &[]), &host, port)
-                .await;
+            upstream = dial_upstream(
+                &cfg,
+                &http1::candidate_endpoints(&system_ips, port, &[]),
+                &host,
+                port,
+            )
+            .await;
         }
     }
     let upstream = match upstream {
@@ -2632,12 +2678,17 @@ async fn handle_http(
             // client hanging either: answer 502 and close.
             rt.send_log(format!("[HTTP] no response from {host}:{port}"));
             let _ = tcp
-                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await;
             return Ok(());
         }
     };
-    rt.send_log(format!("[HTTP] {} {host}:{port} -> {}", req.method, head.status));
+    rt.send_log(format!(
+        "[HTTP] {} {host}:{port} -> {}",
+        req.method, head.status
+    ));
     let _keep = http1::stream_response_body(&mut u_r, tcp, &head, &req.method)
         .await
         .unwrap_or(false);

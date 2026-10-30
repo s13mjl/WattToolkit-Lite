@@ -35,9 +35,15 @@ pub unsafe fn build(app: &mut App) {
     );
     app.ui.mode_label = crate::pages::left_label(h, "加速模式:", ids::MODE_LABEL, ui);
     app.ui.mode_combo = crate::pages::combo(h, ids::MODE_COMBO, ui, false);
-    let modes: Vec<&str> = ProxyMode::available().iter().map(|m| m.display_name()).collect();
+    let modes: Vec<&str> = ProxyMode::available()
+        .iter()
+        .map(|m| m.display_name())
+        .collect();
     win32::combo_fill(app.ui.mode_combo, &modes);
-    win32::set_combo_sel(app.ui.mode_combo, state::mode_index(app.settings.proxy.proxy_mode));
+    win32::set_combo_sel(
+        app.ui.mode_combo,
+        state::mode_index(app.settings.proxy.proxy_mode),
+    );
     app.ui.proxy_settings = crate::pages::button(h, "代理设置", ids::PROXY_SETTINGS, ui);
 
     app.ui.cert_heading = crate::pages::left_label(h, "证书", ids::CERT_HEADING, bold);
@@ -55,7 +61,14 @@ pub unsafe fn build(app: &mut App) {
     app.ui.acc_tabs = controls::make_tabs(h, ids::ACC_TABS, Rect::default(), ui);
     controls::tabs_add(
         app.ui.acc_tabs,
-        &["平台加速", "服务", "加速脚本", "代理日志", "流量统计", "网络检测"],
+        &[
+            "平台加速",
+            "服务",
+            "加速脚本",
+            "代理日志",
+            "流量统计",
+            "网络检测",
+        ],
     );
     controls::tabs_set_sel(app.ui.acc_tabs, 0);
 
@@ -72,7 +85,8 @@ pub unsafe fn build(app: &mut App) {
     );
 
     app.ui.logs_clear = crate::pages::button(h, "清空", ids::LOGS_CLEAR, ui);
-    app.ui.logs_label = crate::pages::left_label(h, "代理日志（最新 1000 条）", ids::LOGS_LABEL, ui);
+    app.ui.logs_label =
+        crate::pages::left_label(h, "代理日志（最新 1000 条）", ids::LOGS_LABEL, ui);
     app.ui.logs_edit = win32::create_control(
         h,
         windows_sys::Win32::UI::Controls::WC_EDITW,
@@ -98,12 +112,8 @@ pub unsafe fn build(app: &mut App) {
     controls::list_columns(app.ui.traffic_list, &[("域名", 300), ("字节", 100)]);
 
     app.ui.nettest_start = crate::pages::button(h, "开始检测", ids::NETTEST_START, ui);
-    app.ui.nettest_hint = crate::pages::left_label(
-        h,
-        "点击“开始检测”运行网络诊断。",
-        ids::NETTEST_HINT,
-        ui,
-    );
+    app.ui.nettest_hint =
+        crate::pages::left_label(h, "点击“开始检测”运行网络诊断。", ids::NETTEST_HINT, ui);
     app.ui.nettest_list = controls::make_list(h, ids::NETTEST_LIST, Rect::default(), ui);
     controls::list_columns(app.ui.nettest_list, &[("项目", 200), ("结果", 300)]);
 
@@ -125,7 +135,8 @@ pub unsafe fn rebuild_platform(app: &mut App) {
 
     for g in &app.groups {
         let label = format!("{} ({} 项)", g.name, state::count_group_leaves(g));
-        let group_item = controls::tree_insert(tree, TVI_ROOT, &label, Some(state::group_enabled(g)), false);
+        let group_item =
+            controls::tree_insert(tree, TVI_ROOT, &label, Some(state::group_enabled(g)), false);
         if group_item == 0 {
             continue;
         }
@@ -133,7 +144,13 @@ pub unsafe fn rebuild_platform(app: &mut App) {
             .insert(group_item, NodeRef::Group(g.name.clone()));
         app.platform_groups.insert(g.name.clone(), group_item);
         for p in &g.items {
-            insert_project(tree, group_item, p, &mut app.platform_nodes, &mut app.platform_leaves);
+            insert_project(
+                tree,
+                group_item,
+                p,
+                &mut app.platform_nodes,
+                &mut app.platform_leaves,
+            );
         }
     }
 }
@@ -146,7 +163,11 @@ unsafe fn insert_project(
     leaves: &mut HashMap<String, HTREEITEM>,
 ) {
     if p.items.is_empty() {
-        let label = format!("{} ({} 个域名)", p.name, state::count_domains(&p.listen_domain_names));
+        let label = format!(
+            "{} ({} 个域名)",
+            p.name,
+            state::count_domains(&p.listen_domain_names)
+        );
         let item = controls::tree_insert(
             tree,
             parent,
@@ -341,7 +362,11 @@ pub unsafe fn refresh_nettest(app: &mut App) {
 pub unsafe fn refresh_nettest_button(app: &mut App) {
     win32::set_text(
         app.ui.nettest_start,
-        if app.testing { "检测中…" } else { "开始检测" },
+        if app.testing {
+            "检测中…"
+        } else {
+            "开始检测"
+        },
     );
     win32::set_enabled(app.ui.nettest_start, !app.testing);
 }
@@ -364,11 +389,19 @@ pub fn start_nettest(app: &mut App) {
             Ok(rt) => rt.block_on(async move {
                 let mut results = Vec::new();
                 results.push(nettest::check_nat().await);
-                results.push(nettest::check_doh("Tencent DoH", wtlite_core::dns::dns_const::DNS_ALI_DOH).await);
-                results.push(nettest::check_doh("DNSPod DoH", wtlite_core::dns::dns_const::DNSPOD_DOH).await);
-                results.push(nettest::check_doh("Google DoH", wtlite_core::dns::dns_const::GOOGLE_DOH).await);
+                results.push(
+                    nettest::check_doh("Tencent DoH", wtlite_core::dns::dns_const::DNS_ALI_DOH)
+                        .await,
+                );
+                results.push(
+                    nettest::check_doh("DNSPod DoH", wtlite_core::dns::dns_const::DNSPOD_DOH).await,
+                );
+                results.push(
+                    nettest::check_doh("Google DoH", wtlite_core::dns::dns_const::GOOGLE_DOH).await,
+                );
                 results.push(nettest::check_ipv6().await);
-                results.push(nettest::check_domain("域名连接", nettest::default_test_domain()).await);
+                results
+                    .push(nettest::check_domain("域名连接", nettest::default_test_domain()).await);
                 results
             }),
             Err(e) => vec![nettest::TestResult {

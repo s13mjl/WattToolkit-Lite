@@ -3,7 +3,8 @@
 pub const APP_NAME: &str = "WattToolkit-Lite";
 
 pub fn local_app_data() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    let base = std::env::var("LOCALAPPDATA")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
     let p = std::path::Path::new(&base).join(APP_NAME);
     let _ = std::fs::create_dir_all(&p);
     p

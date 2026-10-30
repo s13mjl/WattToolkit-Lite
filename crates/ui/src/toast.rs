@@ -22,7 +22,12 @@ thread_local! {
     static GEOM: Cell<(i32, i32, i32, i32)> = const { Cell::new((10, 4, 24, 14)) };
 }
 
-unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn toast_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         wm::WM_PAINT => {
             let (hdc, ps) = win32::begin_paint(hwnd);

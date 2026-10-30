@@ -58,6 +58,27 @@ fn write_connection_blob(blob: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Flip only the flags (and counter) of `DefaultConnectionSettings`, keeping the
+/// stored proxy/bypass/PAC strings untouched. Used when disabling a proxy so the
+/// user's previous manual proxy configuration survives, exactly as the original
+/// `SetAsSystemProxyAsync(false)` did (it only wrote `ProxyEnable=0` and left
+/// `ProxyServer` / `ProxyOverride` in place).
+fn set_blob_flags(manual_enabled: bool, auto_enabled: bool) -> Result<(), String> {
+    let mut blob = read_connection_blob();
+    let counter = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]).wrapping_add(1);
+    blob[4..8].copy_from_slice(&counter.to_le_bytes());
+    let mut flags = FLAG_DIRECT;
+    if manual_enabled {
+        flags |= FLAG_MANUAL_PROXY;
+    }
+    if auto_enabled {
+        flags |= FLAG_AUTO_PROXY_URL;
+    }
+    flags &= !FLAG_AUTO_DETECT;
+    blob[8..12].copy_from_slice(&(flags as u32).to_le_bytes());
+    write_connection_blob(&blob)
+}
+
 /// Rewrite `DefaultConnectionSettings` with the given proxy endpoint and/or PAC
 /// URL. Layout: version, counter, flags, then three length-prefixed strings
 /// (proxy server, bypass list, auto-config URL).
@@ -97,6 +118,11 @@ fn update_blob(endpoint: Option<&str>, auto_url: Option<&str>) -> Result<(), Str
 }
 
 /// No-proxy list (mirrors original IPlatformService.GetNoProxyHostName).
+///
+/// `api.steampp.net` / `shop.api.steampp.net` are the original
+/// `Constants.Urls.OfficialApiHostName` / `OfficialShopApiHostName` values
+/// (BD.WTTS.Primitives `Constants.Urls`): the original deliberately keeps the
+/// app's own API and shop API out of the accelerated proxy.
 pub fn no_proxy_list() -> String {
     [
         "10.*",
@@ -117,8 +143,24 @@ pub fn no_proxy_list() -> String {
         "172.30.*",
         "172.31.*",
         "192.168.*",
+        "api.steampp.net",
+        "shop.api.steampp.net",
     ]
     .join(";")
+}
+
+/// `host:port` with IPv6 literals bracketed (`[::1]:8080`). WinINET's
+/// ProxyServer value and PAC `PROXY host:port` directives both require the
+/// brackets; an unbracketed `::1:8080` is parsed as an invalid host. The
+/// original interpolated `{ip}:{port}` directly (C# `IPAddress.ToString()`),
+/// which only works for IPv4.
+pub fn format_host_port(host: &str, port: u16) -> String {
+    let host = host.trim();
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 fn open_settings() -> Result<RegKey, String> {
@@ -136,25 +178,28 @@ pub fn set_system_proxy(enable: bool, ip: &str, port: u16) -> Result<(), String>
             .set_value("ProxyEnable", &1u32)
             .map_err(|e| e.to_string())?;
         settings
-            .set_value("ProxyServer", &format!("{}:{}", ip, port))
+            .set_value("ProxyServer", &format_host_port(ip, port))
             .map_err(|e| e.to_string())?;
         settings
             .set_value("ProxyOverride", &no_proxy_list())
             .map_err(|e| e.to_string())?;
     } else {
-        settings.set_value("ProxyEnable", &0u32).map_err(|e| e.to_string())?;
-        let _ = settings.delete_value("ProxyServer");
-        let _ = settings.delete_value("ProxyOverride");
+        // Mirrors the original .reg contents: only `ProxyEnable=0` is written;
+        // ProxyServer / ProxyOverride are kept for the next enable and for the
+        // user's own configuration.
+        settings
+            .set_value("ProxyEnable", &0u32)
+            .map_err(|e| e.to_string())?;
     }
     drop(settings);
     // Keep the WinINET blob (what browsers actually read) in sync.
     let auto = read_auto_config_url();
-    let endpoint = if enable {
-        Some(format!("{ip}:{port}"))
+    if enable {
+        let endpoint = format_host_port(ip, port);
+        update_blob(Some(&endpoint), auto.as_deref())?;
     } else {
-        None
-    };
-    update_blob(endpoint.as_deref(), auto.as_deref())?;
+        set_blob_flags(false, auto.is_some())?;
+    }
     notify_proxy_change();
     Ok(())
 }
@@ -162,6 +207,10 @@ pub fn set_system_proxy(enable: bool, ip: &str, port: u16) -> Result<(), String>
 /// Enable or disable the Windows PAC (auto-config) proxy.
 pub fn set_pac_proxy(enable: bool, url: &str) -> Result<(), String> {
     let settings = open_settings()?;
+    let manual_enabled = settings
+        .get_value::<u32, _>("ProxyEnable")
+        .map(|v| v != 0)
+        .unwrap_or(false);
     if enable && !url.is_empty() {
         settings
             .set_value("AutoConfigURL", &url.to_string())
@@ -175,15 +224,18 @@ pub fn set_pac_proxy(enable: bool, url: &str) -> Result<(), String> {
     // Keep the WinINET blob (what browsers actually read) in sync, otherwise the
     // PAC URL is stored but the "direct connection" flag stays set and every
     // browser silently ignores the proxy.
-    let manual = if is_system_proxy_enabled() {
-        read_proxy_server()
+    if enable && !url.is_empty() {
+        let manual = if manual_enabled {
+            read_proxy_server()
+        } else {
+            None
+        };
+        update_blob(manual.as_deref(), Some(url))?;
     } else {
-        None
-    };
-    update_blob(
-        manual.as_deref(),
-        if enable && !url.is_empty() { Some(url) } else { None },
-    )?;
+        // Clear only the PAC flag; a still-enabled manual proxy stays effective
+        // and its stored strings are preserved.
+        set_blob_flags(manual_enabled, false)?;
+    }
     notify_proxy_change();
     Ok(())
 }
@@ -320,10 +372,15 @@ pub fn is_system_proxy_enabled() -> bool {
 /// Generate a PAC file content (mirrors original HttpProxyPacMiddleware.CreateProxyPac).
 pub fn create_pac(proxy_host: &str, domains: &[String]) -> String {
     let mut sb = String::new();
-    sb.push_str("function FindProxyForURL(url, host){
-");
-    sb.push_str(&format!("    var pac = 'PROXY {}';
-", proxy_host));
+    sb.push_str(
+        "function FindProxyForURL(url, host){
+",
+    );
+    sb.push_str(&format!(
+        "    var pac = 'PROXY {}';
+",
+        proxy_host
+    ));
     for d in domains {
         let d = d.trim();
         if d.is_empty() {
@@ -350,16 +407,40 @@ pub fn create_pac(proxy_host: &str, domains: &[String]) -> String {
             "    if (shExpMatch(host,'{base}') || shExpMatch(host,'{star}')) return pac;\n"
         ));
     }
-    sb.push_str("    return 'DIRECT';
-");
-    sb.push_str("}
-");
+    sb.push_str(
+        "    return 'DIRECT';
+",
+    );
+    sb.push_str(
+        "}
+",
+    );
     sb
 }
 
 #[cfg(test)]
 mod tests {
-    use super::create_pac;
+    use super::{create_pac, format_host_port, no_proxy_list};
+
+    #[test]
+    fn host_port_formats_ipv4_and_ipv6() {
+        assert_eq!(format_host_port("127.0.0.1", 26561), "127.0.0.1:26561");
+        assert_eq!(format_host_port("::1", 26561), "[::1]:26561");
+        assert_eq!(format_host_port("[::1]", 26561), "[::1]:26561");
+        assert_eq!(format_host_port("  ::1  ", 8080), "[::1]:8080");
+    }
+
+    #[test]
+    fn no_proxy_matches_original_hosts() {
+        let list = no_proxy_list();
+        let entries: Vec<&str> = list.split(';').collect();
+        assert_eq!(entries.len(), 20, "{list}");
+        assert_eq!(entries[0], "10.*");
+        assert_eq!(entries[17], "192.168.*");
+        // Constants.Urls.OfficialApiHostName / OfficialShopApiHostName.
+        assert_eq!(entries[18], "api.steampp.net");
+        assert_eq!(entries[19], "shop.api.steampp.net");
+    }
 
     #[test]
     fn pac_keeps_wildcard_patterns() {
@@ -380,10 +461,19 @@ mod tests {
         // the proxy all the same: they carry every avatar and image on a GitHub
         // page, and a DIRECT answer sends them into a poisoned resolver - the
         // real-machine symptom "page skeleton loads, everything else fails".
-        let domains = vec!["githubusercontent.com".to_string(), "github.com".to_string()];
+        let domains = vec![
+            "githubusercontent.com".to_string(),
+            "github.com".to_string(),
+        ];
         let pac = create_pac("127.0.0.1:26561", &domains);
-        assert!(pac.contains("shExpMatch(host,'githubusercontent.com')"), "{pac}");
-        assert!(pac.contains("shExpMatch(host,'*.githubusercontent.com')"), "{pac}");
+        assert!(
+            pac.contains("shExpMatch(host,'githubusercontent.com')"),
+            "{pac}"
+        );
+        assert!(
+            pac.contains("shExpMatch(host,'*.githubusercontent.com')"),
+            "{pac}"
+        );
         assert!(pac.contains("shExpMatch(host,'github.com')"), "{pac}");
         assert!(pac.contains("shExpMatch(host,'*.github.com')"), "{pac}");
     }

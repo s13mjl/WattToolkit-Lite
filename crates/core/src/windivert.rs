@@ -3,36 +3,31 @@
 //! with the loopback address, swap IP/UDP addresses, then send the same packet
 //! back. The DNS cache is flushed on start/stop so the OS actually re-queries.
 
+use libloading::{Library, Symbol};
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use libloading::{Library, Symbol};
 
 type WinDivertOpenFn = unsafe extern "system" fn(*const i8, u32, i32, u64) -> *mut c_void;
 // WinDivert 1.4 ABI (proved by probe): (handle, pPacket, packetLen, pAddr, pLen).
 // The address struct comes BEFORE the length out-parameter.
 type WinDivertRecvFn = unsafe extern "system" fn(
-    *mut c_void,   // handle
-    *mut u8,       // pPacket (raw packet data)
-    u32,           // packetLen (buffer size)
-    *mut u8,       // pAddr (WINDIVERT_ADDRESS)
-    *mut u32,      // pRecvLen [out]
+    *mut c_void, // handle
+    *mut u8,     // pPacket (raw packet data)
+    u32,         // packetLen (buffer size)
+    *mut u8,     // pAddr (WINDIVERT_ADDRESS)
+    *mut u32,    // pRecvLen [out]
 ) -> i32;
 type WinDivertSendFn = unsafe extern "system" fn(
-    *mut c_void,   // handle
-    *const u8,     // pPacket
-    u32,           // packetLen
-    *const u8,     // pAddr
-    *mut u32,      // pSendLen [out]
+    *mut c_void, // handle
+    *const u8,   // pPacket
+    u32,         // packetLen
+    *const u8,   // pAddr
+    *mut u32,    // pSendLen [out]
 ) -> i32;
 type WinDivertCloseFn = unsafe extern "system" fn(*mut c_void);
-type WinDivertCalcChecksumsFn = unsafe extern "system" fn(
-    *mut u8,
-    u32,
-    *const u8,
-    u64,
-) -> i32;
+type WinDivertCalcChecksumsFn = unsafe extern "system" fn(*mut u8, u32, *const u8, u64) -> i32;
 
 /// The original uses "udp.DstPort == 53" (no direction): the packet is modified
 /// in place and sent back, so both directions are captured.
@@ -46,6 +41,7 @@ const LAYER_NETWORK: u32 = 0;
 const FLAG_OUTBOUND: u8 = 0x02;
 const FLAG_LOOPBACK: u8 = 0x04;
 const FLAG_IMPOSTOR: u8 = 0x08;
+const FLAG_IPV6: u8 = 0x10;
 const ADDR_FLAGS_OFF: usize = 9;
 
 #[link(name = "dnsapi")]
@@ -68,7 +64,11 @@ impl DnsInterceptRuntime {
         domains: Arc<RwLock<HashSet<String>>>,
         log_tx: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Self {
-        Self { domains, log_tx, stop: Arc::new(AtomicBool::new(false)) }
+        Self {
+            domains,
+            log_tx,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
@@ -84,30 +84,50 @@ impl DnsInterceptRuntime {
         let lib = match unsafe { Library::new("WinDivert.dll") } {
             Ok(l) => l,
             Err(e) => {
-                self.send_log(format!("[WinDivert] WinDivert.dll not found: {e}. DNS 拦截不可用。"));
+                self.send_log(format!(
+                    "[WinDivert] WinDivert.dll not found: {e}. DNS 拦截不可用。"
+                ));
                 return;
             }
         };
         let open: Symbol<WinDivertOpenFn> = match unsafe { lib.get(b"WinDivertOpen") } {
             Ok(s) => s,
-            Err(e) => { self.send_log(format!("[WinDivert] WinDivertOpen symbol missing: {e}")); return; }
+            Err(e) => {
+                self.send_log(format!("[WinDivert] WinDivertOpen symbol missing: {e}"));
+                return;
+            }
         };
         let recv: Symbol<WinDivertRecvFn> = match unsafe { lib.get(b"WinDivertRecv") } {
             Ok(s) => s,
-            Err(e) => { self.send_log(format!("[WinDivert] WinDivertRecv symbol missing: {e}")); return; }
+            Err(e) => {
+                self.send_log(format!("[WinDivert] WinDivertRecv symbol missing: {e}"));
+                return;
+            }
         };
         let send: Symbol<WinDivertSendFn> = match unsafe { lib.get(b"WinDivertSend") } {
             Ok(s) => s,
-            Err(e) => { self.send_log(format!("[WinDivert] WinDivertSend symbol missing: {e}")); return; }
+            Err(e) => {
+                self.send_log(format!("[WinDivert] WinDivertSend symbol missing: {e}"));
+                return;
+            }
         };
         let close: Symbol<WinDivertCloseFn> = match unsafe { lib.get(b"WinDivertClose") } {
             Ok(s) => s,
-            Err(e) => { self.send_log(format!("[WinDivert] WinDivertClose symbol missing: {e}")); return; }
+            Err(e) => {
+                self.send_log(format!("[WinDivert] WinDivertClose symbol missing: {e}"));
+                return;
+            }
         };
-        let calc_checksums: Symbol<WinDivertCalcChecksumsFn> = match unsafe { lib.get(b"WinDivertHelperCalcChecksums") } {
-            Ok(s) => s,
-            Err(e) => { self.send_log(format!("[WinDivert] WinDivertHelperCalcChecksums symbol missing: {e}")); return; }
-        };
+        let calc_checksums: Symbol<WinDivertCalcChecksumsFn> =
+            match unsafe { lib.get(b"WinDivertHelperCalcChecksums") } {
+                Ok(s) => s,
+                Err(e) => {
+                    self.send_log(format!(
+                        "[WinDivert] WinDivertHelperCalcChecksums symbol missing: {e}"
+                    ));
+                    return;
+                }
+            };
 
         // The original pre-loads the driver with "false" because the first load
         // often throws; doing it here keeps the real open clean.
@@ -119,7 +139,10 @@ impl DnsInterceptRuntime {
             }
         }
 
-        let filter = match std::ffi::CString::new(DNS_FILTER) { Ok(f) => f, Err(_) => return };
+        let filter = match std::ffi::CString::new(DNS_FILTER) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
         let handle = unsafe { open(filter.as_ptr(), LAYER_NETWORK, 0, 0) };
         if handle.is_null() || (handle as isize) == -1 {
             let err = unsafe { GetLastError() };
@@ -136,10 +159,20 @@ impl DnsInterceptRuntime {
         let mut len: u32 = 0;
 
         while !self.stop.load(Ordering::Relaxed) {
-            let ok = unsafe { recv(handle, buf.as_mut_ptr(), buf.len() as u32, addr.as_mut_ptr(), &mut len) };
+            let ok = unsafe {
+                recv(
+                    handle,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    addr.as_mut_ptr(),
+                    &mut len,
+                )
+            };
             if ok == 0 {
                 let err = unsafe { GetLastError() };
-                self.send_log(format!("[WinDivert] WinDivertRecv 失败 GetLastError={err:#x}"));
+                self.send_log(format!(
+                    "[WinDivert] WinDivertRecv 失败 GetLastError={err:#x}"
+                ));
                 break;
             }
             let n = len as usize;
@@ -150,7 +183,12 @@ impl DnsInterceptRuntime {
             // Pass the whole buffer (not a slice trimmed to the packet length):
             // the DNS response is longer than the query, so it must be able to
             // grow into the spare room.
-            let intercepted = match modify_dns_packet(&mut buf, &mut len, &mut addr, &self.domains.read().unwrap()) {
+            let intercepted = match modify_dns_packet(
+                &mut buf,
+                &mut len,
+                &mut addr,
+                &self.domains.read().unwrap(),
+            ) {
                 Some(domain) => {
                     // Mirror the original: recompute all checksums after rewriting.
                     // WinDivertSharp: All = 0 (calculate everything); 0xF would skip all.
@@ -179,11 +217,16 @@ impl DnsInterceptRuntime {
                 let r = send(handle, buf.as_ptr(), len, addr.as_ptr(), &mut sent);
                 if r == 0 {
                     let err = unsafe { GetLastError() };
-                    self.send_log(format!("[WinDivert] WinDivertSend 失败 GetLastError={err:#x}"));
+                    self.send_log(format!(
+                        "[WinDivert] WinDivertSend 失败 GetLastError={err:#x}"
+                    ));
                 }
             }
         }
-        unsafe { close(handle); DnsFlushResolverCache() };
+        unsafe {
+            close(handle);
+            DnsFlushResolverCache()
+        };
         self.send_log("[WinDivert] DNS 拦截已停止".to_string());
     }
 }
@@ -207,17 +250,39 @@ fn modify_dns_packet(
     domains: &HashSet<String>,
 ) -> Option<String> {
     let n = *len as usize;
-    if n < 28 || packet[0] >> 4 != 4 {
-        return None; // IPv4 only (matches the original's main path)
-    }
-    let ihl = ((packet[0] & 0x0f) as usize) * 4;
-    if packet[9] != 17 || n < ihl + 8 + 12 {
+    if n < 1 {
         return None;
     }
-    let udp = ihl;
-    let dns = ihl + 8;
-    // Only answer standard queries.
-    if packet[dns + 2] & 0x80 != 0 {
+    // The original DnsInterceptor handles both IPv4 and IPv6 (`IPv4Header` /
+    // `IPv6Header` branches). IPv6 extension headers are not used by the Windows
+    // stub resolver, so the fixed 40-byte header is sufficient here.
+    let version = packet[0] >> 4;
+    let ipv4_ihl = if version == 4 {
+        if n < 28 || packet[9] != 17 {
+            return None;
+        }
+        let ihl = ((packet[0] & 0x0f) as usize) * 4;
+        if n < ihl + 8 + 12 {
+            return None;
+        }
+        Some(ihl)
+    } else if version == 6 {
+        // 40-byte fixed header + 8-byte UDP header + 12-byte DNS header.
+        if n < 60 || packet[6] != 17 {
+            return None;
+        }
+        None
+    } else {
+        return None;
+    };
+    let udp = if let Some(ihl) = ipv4_ihl { ihl } else { 40 };
+    let dns = udp + 8;
+    // Only answer standard queries (`Request.OperationCode == OperationCode.Query`
+    // and `Questions.Count > 0` in the original DnsInterceptor).
+    if packet[dns + 2] & 0x80 != 0 || packet[dns + 2] & 0x78 != 0 {
+        return None;
+    }
+    if packet[dns + 4] != 0 || packet[dns + 5] == 0 {
         return None;
     }
     // Parse the question name.
@@ -225,15 +290,24 @@ fn modify_dns_packet(
     let mut labels: Vec<String> = Vec::new();
     while i < n {
         let l = packet[i] as usize;
-        if l == 0 { i += 1; break; }
+        if l == 0 {
+            i += 1;
+            break;
+        }
         i += 1;
-        if i + l > n { return None; }
+        if i + l > n {
+            return None;
+        }
         labels.push(String::from_utf8_lossy(&packet[i..i + l]).to_string());
         i += l;
     }
-    if labels.is_empty() || i + 4 > n { return None; }
+    if labels.is_empty() || i + 4 > n {
+        return None;
+    }
     let qtype = u16::from_be_bytes([packet[i], packet[i + 1]]);
-    if qtype != 1 && qtype != 28 { return None; } // A / AAAA
+    if qtype != 1 && qtype != 28 {
+        return None;
+    } // A / AAAA
     let qend = i + 4;
     let domain = labels.join(".");
     let dl = domain.to_lowercase();
@@ -248,47 +322,66 @@ fn modify_dns_packet(
         return None;
     }
 
-    // Build the response payload: header + question, plus one answer record for an
-    // A query. An AAAA query is answered with an empty NOERROR response (NODATA)
-    // instead of `::1`: the 443 listener has no IPv6 socket, so `::1` would be a
-    // dead end, while passing the query through would defeat the interception. The
-    // cost of that rule is that a v6-only client is pushed back to v4.
+    // Build the response payload: header + question + one answer record. A gets
+    // 127.0.0.1, AAAA gets ::1, exactly like the original DnsInterceptor.
     let mut resp = Vec::new();
     resp.extend_from_slice(&packet[dns..dns + 2]); // transaction id
-    resp.extend_from_slice(&[0x81, 0x80]);         // response, recursion available
-    resp.extend_from_slice(&[0x00, 0x01]);         // qdcount
-    let ancount: [u8; 2] = if qtype == 1 { [0x00, 0x01] } else { [0x00, 0x00] };
-    resp.extend_from_slice(&ancount);
-    resp.extend_from_slice(&[0x00, 0x00]);
-    resp.extend_from_slice(&[0x00, 0x00]);
+    resp.extend_from_slice(&[0x81, 0x80]); // response, recursion available
+    resp.extend_from_slice(&[0x00, 0x01]); // qdcount
+    resp.extend_from_slice(&[0x00, 0x01]); // ancount = 1
+    resp.extend_from_slice(&[0x00, 0x00]); // nscount
+    resp.extend_from_slice(&[0x00, 0x00]); // arcount
     resp.extend_from_slice(&packet[dns + 12..qend]); // question
+    resp.extend_from_slice(&[0xC0, 0x0C]); // name pointer
+    resp.extend_from_slice(&qtype.to_be_bytes());
+    resp.extend_from_slice(&[0x00, 0x01]); // class IN
+    resp.extend_from_slice(&300u32.to_be_bytes()); // ttl 5 min (original)
     if qtype == 1 {
-        resp.extend_from_slice(&[0xC0, 0x0C]);          // name pointer
-        resp.extend_from_slice(&qtype.to_be_bytes());
-        resp.extend_from_slice(&[0x00, 0x01]);          // class IN
-        resp.extend_from_slice(&300u32.to_be_bytes());  // ttl 5 min (original)
-        resp.extend_from_slice(&4u16.to_be_bytes());    // rdlength
-        resp.extend_from_slice(&[127, 0, 0, 1]);        // 127.0.0.1
+        resp.extend_from_slice(&4u16.to_be_bytes());
+        resp.extend_from_slice(&[127, 0, 0, 1]);
+    } else {
+        resp.extend_from_slice(&16u16.to_be_bytes());
+        resp.extend_from_slice(&[0u8; 15]);
+        resp.push(1); // ::1
     }
 
-    if dns + resp.len() > packet.len() { return None; }
+    if dns + resp.len() > packet.len() {
+        return None;
+    }
     packet[dns..dns + resp.len()].copy_from_slice(&resp);
     let new_len = dns + resp.len();
     *len = new_len as u32;
 
-    // Swap IPv4 src/dst and fix the total length.
-    let mut src = [0u8; 4];
-    let mut dst = [0u8; 4];
-    src.copy_from_slice(&packet[12..16]);
-    dst.copy_from_slice(&packet[16..20]);
-    packet[12..16].copy_from_slice(&dst);
-    packet[16..20].copy_from_slice(&src);
-    packet[2..4].copy_from_slice(&(new_len as u16).to_be_bytes());
-    packet[10..12].copy_from_slice(&[0, 0]);
-    let csum = ip_checksum(&packet[..ihl]);
-    packet[10..12].copy_from_slice(&csum.to_be_bytes());
+    match version {
+        4 => {
+            let ihl = ipv4_ihl.expect("IPv4 header length");
+            let mut src = [0u8; 4];
+            let mut dst = [0u8; 4];
+            src.copy_from_slice(&packet[12..16]);
+            dst.copy_from_slice(&packet[16..20]);
+            packet[12..16].copy_from_slice(&dst);
+            packet[16..20].copy_from_slice(&src);
+            packet[2..4].copy_from_slice(&(new_len as u16).to_be_bytes());
+            packet[10..12].copy_from_slice(&[0, 0]);
+            let csum = ip_checksum(&packet[..ihl]);
+            packet[10..12].copy_from_slice(&csum.to_be_bytes());
+        }
+        6 => {
+            let mut src = [0u8; 16];
+            let mut dst = [0u8; 16];
+            src.copy_from_slice(&packet[8..24]);
+            dst.copy_from_slice(&packet[24..40]);
+            packet[8..24].copy_from_slice(&dst);
+            packet[24..40].copy_from_slice(&src);
+            // IPv6 payload length excludes the fixed 40-byte header; IPv6 has
+            // no header checksum, and the UDP checksum is recomputed by
+            // WinDivertHelperCalcChecksums after this function returns.
+            packet[4..6].copy_from_slice(&((resp.len() + 8) as u16).to_be_bytes());
+        }
+        _ => unreachable!(),
+    }
 
-    // Swap UDP ports and fix the length (checksum 0 = not computed, valid IPv4).
+    // Swap UDP ports and fix the length.
     let sp = [packet[udp], packet[udp + 1]];
     packet[udp] = packet[udp + 2];
     packet[udp + 1] = packet[udp + 3];
@@ -302,12 +395,18 @@ fn modify_dns_packet(
     //  Direction = Loopback ? Outbound : Inbound).
     if addr.len() > ADDR_FLAGS_OFF {
         let flags = addr[ADDR_FLAGS_OFF];
-        addr[ADDR_FLAGS_OFF] = flags | FLAG_IMPOSTOR;
+        let mut new_flags = flags | FLAG_IMPOSTOR;
         if flags & FLAG_LOOPBACK != 0 {
-            addr[ADDR_FLAGS_OFF] |= FLAG_OUTBOUND;
+            new_flags |= FLAG_OUTBOUND;
         } else {
-            addr[ADDR_FLAGS_OFF] &= !FLAG_OUTBOUND;
+            new_flags &= !FLAG_OUTBOUND;
         }
+        if version == 6 {
+            new_flags |= FLAG_IPV6;
+        } else {
+            new_flags &= !FLAG_IPV6;
+        }
+        addr[ADDR_FLAGS_OFF] = new_flags;
     }
     Some(domain)
 }
@@ -315,11 +414,14 @@ fn modify_dns_packet(
 /// Read-only query-name peek for diagnostics (returns None for non-DNS).
 fn peek_query_name(packet: &[u8]) -> Option<String> {
     let n = packet.len();
-    if n < 28 || packet[0] >> 4 != 4 || packet[9] != 17 {
+    if n < 1 {
         return None;
     }
-    let ihl = ((packet[0] & 0x0f) as usize) * 4;
-    let dns = ihl + 8;
+    let dns = match packet[0] >> 4 {
+        4 if n >= 28 && packet[9] == 17 => ((packet[0] & 0x0f) as usize) * 4 + 8,
+        6 if n >= 48 && packet[6] == 17 => 48,
+        _ => return None,
+    };
     if n < dns + 14 || packet[dns + 2] & 0x80 != 0 {
         return None;
     }
@@ -397,6 +499,40 @@ mod tests {
         (packet, total as u32, vec![0u8; 64])
     }
 
+    fn dns_query_v6(domain: &str, qtype: u16) -> (Vec<u8>, u32, Vec<u8>) {
+        let mut question = Vec::new();
+        for label in domain.split('.') {
+            question.push(label.len() as u8);
+            question.extend_from_slice(label.as_bytes());
+        }
+        question.push(0);
+        question.extend_from_slice(&qtype.to_be_bytes());
+        question.extend_from_slice(&1u16.to_be_bytes()); // class IN
+        let udp_len = 12 + question.len();
+        let total = 40 + 8 + udp_len;
+        let mut packet = vec![0u8; total + 512];
+        packet[0] = 0x60; // IPv6
+        packet[4..6].copy_from_slice(&((udp_len + 8) as u16).to_be_bytes());
+        packet[6] = 17; // UDP
+        packet[7] = 64; // hop limit
+                        // Source 2001:db8::2, destination 2001:db8::53.
+        packet[8..24]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        packet[24..40].copy_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53,
+        ]);
+        let udp = 40;
+        packet[udp..udp + 2].copy_from_slice(&51000u16.to_be_bytes());
+        packet[udp + 2..udp + 4].copy_from_slice(&53u16.to_be_bytes());
+        packet[udp + 4..udp + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        let dns = udp + 8;
+        packet[dns..dns + 2].copy_from_slice(&0x1234u16.to_be_bytes());
+        packet[dns + 2..dns + 4].copy_from_slice(&[0x01, 0x00]);
+        packet[dns + 4..dns + 6].copy_from_slice(&1u16.to_be_bytes());
+        packet[dns + 12..dns + 12 + question.len()].copy_from_slice(&question);
+        (packet, total as u32, vec![0u8; 64])
+    }
+
     fn intercept_set() -> HashSet<String> {
         ["*.steamcommunity.com".to_string()].into_iter().collect()
     }
@@ -416,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn an_aaaa_query_is_answered_with_nodata() {
+    fn an_aaaa_query_is_answered_with_ipv6_loopback() {
         let domains = intercept_set();
         let (mut packet, query_len, mut addr) = dns_query("store.steamcommunity.com", 28);
         let mut len = query_len;
@@ -426,11 +562,61 @@ mod tests {
         );
         let payload = &packet[28..len as usize];
         assert_eq!(&payload[2..4], &[0x81, 0x80]); // NOERROR response, RA set
-        assert_eq!(&payload[6..8], &[0x00, 0x00]); // ancount = 0: NODATA, not `::1`
-        assert_eq!(&payload[8..12], &[0x00, 0x00, 0x00, 0x00]); // no authority/additional
-        // The empty answer is exactly the question echoed back, so the rewritten
-        // length matches the query it replaced.
-        assert_eq!(len, query_len);
+        assert_eq!(&payload[6..8], &[0x00, 0x01]); // ancount = 1
+        assert_eq!(
+            &payload[payload.len() - 16..],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        ); // ::1
+        assert!(len > query_len);
+    }
+
+    #[test]
+    fn an_ipv6_a_query_is_rewritten_in_place_and_answered() {
+        let domains = intercept_set();
+        let (mut packet, query_len, mut addr) = dns_query_v6("store.steamcommunity.com", 1);
+        let mut len = query_len;
+        assert_eq!(
+            windivert_modify_dns_packet(&mut packet, &mut len, &mut addr, &domains).as_deref(),
+            Some("store.steamcommunity.com")
+        );
+        assert_eq!(packet[0] >> 4, 6);
+        assert_eq!(
+            &packet[8..24],
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53]
+        ); // former destination is now source
+        assert_eq!(
+            &packet[24..40],
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]
+        );
+        let payload = &packet[48..len as usize];
+        assert_eq!(&payload[6..8], &[0x00, 0x01]);
+        assert_eq!(&payload[payload.len() - 4..], &[127, 0, 0, 1]);
+        assert_ne!(addr[9] & FLAG_IPV6, 0);
+    }
+
+    #[test]
+    fn a_non_query_opcode_is_left_alone() {
+        let domains = intercept_set();
+        let (mut packet, mut len, mut addr) = dns_query("store.steamcommunity.com", 1);
+        packet[20 + 8 + 2] |= 0x08; // Opcode = IQUERY (bits 3..6)
+        let before = packet.clone();
+        assert_eq!(
+            windivert_modify_dns_packet(&mut packet, &mut len, &mut addr, &domains),
+            None
+        );
+        assert_eq!(packet, before);
+    }
+
+    #[test]
+    fn a_truncated_ipv6_packet_does_not_panic() {
+        let domains = intercept_set();
+        let (mut packet, _, mut addr) = dns_query_v6("store.steamcommunity.com", 1);
+        packet.truncate(50); // shorter than IPv6 + UDP + DNS headers
+        let mut len = packet.len() as u32;
+        assert_eq!(
+            windivert_modify_dns_packet(&mut packet, &mut len, &mut addr, &domains),
+            None
+        );
     }
 
     #[test]

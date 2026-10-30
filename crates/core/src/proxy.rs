@@ -2,7 +2,9 @@
 //! system proxy / PAC registry writes, and the WinDivert DNS interceptor.
 
 use crate::cert::CertificateManager;
-use crate::fwd::{run_forward_proxy_on, run_steered_tunnel_on, ConfiguredIps, FakeNames, FwdRuntime};
+use crate::fwd::{
+    run_forward_proxy_on, run_steered_tunnel_on, ConfiguredIps, FakeNames, FwdRuntime,
+};
 use crate::hosts;
 use crate::mitm::{run_mitm_on, MitmRuntime};
 use crate::model::{AccelerateProject, AccelerateProjectGroup, ProxyMode, ProxyType};
@@ -406,6 +408,15 @@ impl ProxyManager {
         // A `*.` prefix is dropped because a hosts line cannot contain `*`.
         let mut hosts_hosts: HashSet<String> = HashSet::new();
         let mut hosts_entries: Vec<(String, String)> = Vec::new();
+        // The original Hosts branch points entries at the configured proxy IP
+        // (`IPAddress.Any` means loopback) and binds the 443 listener to that
+        // same IP. The previous code hard-coded 127.0.0.1 for both.
+        let configured_proxy_ip = settings.system_proxy_ip.trim().parse::<IpAddr>().ok();
+        let hosts_default_ip = match configured_proxy_ip {
+            Some(ip) if !ip.is_unspecified() => ip.to_string(),
+            _ => "127.0.0.1".to_string(),
+        };
+        let hosts_bind_ip = configured_proxy_ip.unwrap_or(IpAddr::from([0, 0, 0, 0]));
         // Manifest-configured upstream addresses (original
         // `ReverseProxyConfig.IPAddress`), tried ahead of the resolved DNS
         // answers. Kept as a list so the manifest order survives: at lookup time
@@ -448,7 +459,7 @@ impl ProxyManager {
                         }
                         let (host, ip) = match h.split_once(' ') {
                             Some((ip, host)) => (host.trim().to_string(), ip.trim().to_string()),
-                            None => (h, "127.0.0.1".to_string()),
+                            None => (h, hosts_default_ip.clone()),
                         };
                         let host = host.strip_prefix("*.").unwrap_or(&host).to_string();
                         if !host.is_empty() && hosts_hosts.insert(host.clone()) {
@@ -536,7 +547,6 @@ impl ProxyManager {
         // Root cert is needed by the MITM path (Hosts + DnsIntercept modes).
         let root_for_mitm = cert.root().ok();
 
-
         g.running = true;
         g.mode = Some(mode);
         g.started_at = Some(SystemTime::now());
@@ -614,8 +624,7 @@ impl ProxyManager {
                     }
                 }
                 // 3. Start MITM listener on 443 (bind first so failures surface).
-                let mitm_bind: SocketAddr =
-                    (IpAddr::from([127, 0, 0, 1]), 443u16).into();
+                let mitm_bind: SocketAddr = (hosts_bind_ip, 443u16).into();
                 let mitm_listener = match tokio::net::TcpListener::bind(mitm_bind).await {
                     Ok(l) => l,
                     Err(e) => {
@@ -670,7 +679,9 @@ impl ProxyManager {
                     let _ = run_forward_proxy_on(listener, rt).await;
                 });
                 // Set the Windows system proxy (no elevation needed, HKCU).
-                if let Err(e) = sysproxy::set_system_proxy(true, &ip.to_string(), settings.system_proxy_port) {
+                if let Err(e) =
+                    sysproxy::set_system_proxy(true, &ip.to_string(), settings.system_proxy_port)
+                {
                     // Roll back the whole start, not just the `running` flag: the
                     // listener spawned just above must be released (otherwise the
                     // immediate retry fails with "port in use") and the recorded
@@ -723,10 +734,12 @@ impl ProxyManager {
                 let task = tokio::spawn(async move {
                     let _ = run_forward_proxy_on(listener, rt).await;
                 });
+                // Mirrors the original PAC branch: `http://{ip}:{port}/pac`.
+                // IPv6 literals need brackets in a URL; the original's plain
+                // `{ip}:{port}` interpolation only produced valid IPV4 URLs.
                 let pac_url = format!(
-                    "http://{}:{}/proxy.pac",
-                    ip,
-                    settings.system_proxy_port
+                    "http://{}/pac",
+                    sysproxy::format_host_port(&ip.to_string(), settings.system_proxy_port)
                 );
                 if let Err(e) = sysproxy::set_pac_proxy(true, &pac_url) {
                     // Same rollback as the System branch: release the listener and
@@ -797,31 +810,21 @@ impl ProxyManager {
                 let mut intercept_cfg = config.read().unwrap().clone();
                 intercept_cfg.use_doh = true;
                 let intercept_cfg = Arc::new(RwLock::new(intercept_cfg));
-                let task_443 = if should_decrypt_locally(
-                    mode,
-                    decrypt_enabled,
-                    cert.is_installed(),
-                ) {
-                    let rt = MitmRuntime {
-                        cm: cert.clone(),
-                        cache: Arc::new(crate::cert::LeafCache::default()),
-                        root: root_for_mitm.clone().unwrap_or_else(|| Arc::new(crate::cert::RootCertificate {
-                            der: Vec::new(),
-                            key_pkcs8: Vec::new(),
-                            not_after: std::time::SystemTime::UNIX_EPOCH,
-                        })),
-                        config: intercept_cfg.clone(),
-                        stats: stats.clone(),
-                        log_tx: log_tx.clone(),
-                        forward: forward_arc.clone(),
-                        configured_ips: configured_ips_arc.clone(),
-                        fake_names: fake_names_arc.clone(),
-                        domains: domains_arc.clone(),
-                    };
-                    tokio::spawn(async move {
-                        let _ = run_mitm_on(mitm_listener, rt).await;
-                    })
-                } else {
+                // AAAA answers point at ::1, so the 443 listener must exist on
+                // both loopback families (the original Kestrel socket is
+                // dual-stack). Failure to bind IPv6 is logged and does not abort
+                // IPv4 acceleration.
+                let mut listeners_443 = vec![mitm_listener];
+                match tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 443u16)).await {
+                    Ok(listener) => listeners_443.push(listener),
+                    Err(e) => log::warn!(
+                        target: "wtlite_core::proxy",
+                        "IPv6 443 监听绑定失败（IPv6 加速可能不可用）: {e}"
+                    ),
+                }
+                let decrypt_443 =
+                    should_decrypt_locally(mode, decrypt_enabled, cert.is_installed());
+                if !decrypt_443 {
                     // The gate above is closed - the root certificate is not trusted,
                     // or local decryption is switched off: decrypting here would hand
                     // every client a certificate it rejects, so the listener relays the
@@ -834,19 +837,48 @@ impl ProxyManager {
                     );
                     log::warn!(target: "wtlite_core::proxy", "{msg}");
                     let _ = log_tx.send(msg.to_string());
-                    let rt = FwdRuntime {
-                        config: intercept_cfg.clone(),
-                        domains: domains_arc.clone(),
-                        stats: stats.clone(),
-                        log_tx: log_tx.clone(),
-                        mitm: None,
-                        forward: forward_arc.clone(),
-                        configured_ips: configured_ips_arc.clone(),
+                }
+                let leaf_cache = Arc::new(crate::cert::LeafCache::default());
+                let mut tasks_443 = Vec::new();
+                for mitm_listener in listeners_443 {
+                    let task = if decrypt_443 {
+                        let rt = MitmRuntime {
+                            cm: cert.clone(),
+                            cache: leaf_cache.clone(),
+                            root: root_for_mitm.clone().unwrap_or_else(|| {
+                                Arc::new(crate::cert::RootCertificate {
+                                    der: Vec::new(),
+                                    key_pkcs8: Vec::new(),
+                                    not_after: std::time::SystemTime::UNIX_EPOCH,
+                                })
+                            }),
+                            config: intercept_cfg.clone(),
+                            stats: stats.clone(),
+                            log_tx: log_tx.clone(),
+                            forward: forward_arc.clone(),
+                            configured_ips: configured_ips_arc.clone(),
+                            fake_names: fake_names_arc.clone(),
+                            domains: domains_arc.clone(),
+                        };
+                        tokio::spawn(async move {
+                            let _ = run_mitm_on(mitm_listener, rt).await;
+                        })
+                    } else {
+                        let rt = FwdRuntime {
+                            config: intercept_cfg.clone(),
+                            domains: domains_arc.clone(),
+                            stats: stats.clone(),
+                            log_tx: log_tx.clone(),
+                            mitm: None,
+                            forward: forward_arc.clone(),
+                            configured_ips: configured_ips_arc.clone(),
+                        };
+                        tokio::spawn(async move {
+                            let _ = run_steered_tunnel_on(mitm_listener, rt).await;
+                        })
                     };
-                    tokio::spawn(async move {
-                        let _ = run_steered_tunnel_on(mitm_listener, rt).await;
-                    })
-                };
+                    tasks_443.push(task);
+                }
                 let fwd_rt = FwdRuntime {
                     config: intercept_cfg,
                     domains: domains_arc.clone(),
@@ -870,7 +902,7 @@ impl ProxyManager {
                     move || wd.run()
                 });
                 let mut g = self.inner.lock().unwrap();
-                g.tasks.push(task_443);
+                g.tasks.extend(tasks_443);
                 g.tasks.push(task_fwd);
                 g.windivert_stop = Some(stop_flag);
             }
@@ -914,9 +946,7 @@ impl ProxyManager {
         g.started_at = None;
         // Drop the manager-owned runtime so its listeners are released too.
         if let Some(rt) = g.runtime.take() {
-            Arc::try_unwrap(rt)
-                .map(|rt| rt.shutdown_background())
-                .ok();
+            Arc::try_unwrap(rt).map(|rt| rt.shutdown_background()).ok();
         }
     }
 }
@@ -969,7 +999,10 @@ mod tests {
     #[test]
     fn an_explicit_listen_address_is_kept() {
         assert_eq!(proxy_bind_ip(" 127.0.0.1 "), loopback());
-        assert_eq!(proxy_bind_ip("192.168.1.10"), IpAddr::from([192, 168, 1, 10]));
+        assert_eq!(
+            proxy_bind_ip("192.168.1.10"),
+            IpAddr::from([192, 168, 1, 10])
+        );
     }
 
     /// The setting is free text here (the original binds it to an `IPAddress`),
@@ -1013,16 +1046,16 @@ mod tests {
     fn forward_domain_names_are_classified_like_the_original_dto() {
         let mut pinned = leaf("a.com", None, true, false);
         pinned.forward_domain_names = Some(" 1.2.3.4 ".to_string());
-        assert_eq!(
-            leaf_local_ips(&pinned),
-            vec![IpAddr::from([1, 2, 3, 4])]
-        );
+        assert_eq!(leaf_local_ips(&pinned), vec![IpAddr::from([1, 2, 3, 4])]);
         assert_eq!(leaf_local_alias(&pinned), None);
 
         let mut alias = leaf("a.com", None, true, false);
         alias.forward_domain_names = Some(" CDN.Example.NET ".to_string());
         assert!(leaf_local_ips(&alias).is_empty());
-        assert_eq!(leaf_local_alias(&alias), Some("cdn.example.net".to_string()));
+        assert_eq!(
+            leaf_local_alias(&alias),
+            Some("cdn.example.net".to_string())
+        );
 
         let mut both = leaf("a.com", None, true, false);
         both.forward_domain_names = Some("1.2.3.4".to_string());
@@ -1202,14 +1235,21 @@ mod tests {
             ),
         ];
         for (site, wording) in certificate_untrusted {
-            assert_eq!(local_decryption_fallback_warning(site, true), wording, "{site:?}");
+            assert_eq!(
+                local_decryption_fallback_warning(site, true),
+                wording,
+                "{site:?}"
+            );
             let disabled = local_decryption_fallback_warning(site, false);
             assert_ne!(disabled, wording, "{site:?}");
             assert!(
                 disabled.contains("已在设置中关闭本地 TLS 解密"),
                 "{site:?}: {disabled}"
             );
-            assert!(!disabled.contains("根证书未被系统信任"), "{site:?}: {disabled}");
+            assert!(
+                !disabled.contains("根证书未被系统信任"),
+                "{site:?}: {disabled}"
+            );
             assert!(
                 disabled.contains("该开关在启动时读取，修改后需重启本程序生效"),
                 "{site:?}: {disabled}"

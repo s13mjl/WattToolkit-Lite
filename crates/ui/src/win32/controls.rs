@@ -78,7 +78,12 @@ pub unsafe fn tree_insert(
     if expanded {
         item.state |= Controls::TVIS_EXPANDED;
     }
-    item.stateMask = parent_mask(expanded) | if checked.is_none() { Controls::TVIS_STATEIMAGEMASK } else { 0 };
+    item.stateMask = parent_mask(expanded)
+        | if checked.is_none() {
+            Controls::TVIS_STATEIMAGEMASK
+        } else {
+            0
+        };
 
     let mut ins: Controls::TVINSERTSTRUCTW = std::mem::zeroed();
     ins.hParent = parent_item;
@@ -123,7 +128,13 @@ pub unsafe fn tree_check(hwnd: HWND, item: Controls::HTREEITEM) -> Option<bool> 
     tvi.mask = Controls::TVIF_STATE;
     tvi.hItem = item;
     tvi.stateMask = Controls::TVIS_STATEIMAGEMASK;
-    if wm::SendMessageW(hwnd, Controls::TVM_GETITEMW, 0, &mut tvi as *mut _ as LPARAM) == 0 {
+    if wm::SendMessageW(
+        hwnd,
+        Controls::TVM_GETITEMW,
+        0,
+        &mut tvi as *mut _ as LPARAM,
+    ) == 0
+    {
         return None;
     }
     let idx = (tvi.state & Controls::TVIS_STATEIMAGEMASK) >> 12;
@@ -209,7 +220,12 @@ pub unsafe fn list_add(hwnd: HWND, row: &[String], lparam: isize) {
     item.iItem = index;
     item.pszText = first_w.as_ptr() as windows_sys::core::PWSTR;
     item.lParam = lparam;
-    wm::SendMessageW(hwnd, Controls::LVM_INSERTITEMW, 0, &item as *const _ as LPARAM);
+    wm::SendMessageW(
+        hwnd,
+        Controls::LVM_INSERTITEMW,
+        0,
+        &item as *const _ as LPARAM,
+    );
     for (sub, text) in row.iter().enumerate().skip(1) {
         let sub_w = wide(text);
         let mut item: Controls::LVITEMW = std::mem::zeroed();
@@ -271,4 +287,3 @@ pub unsafe fn tv_item_change(lparam: LPARAM) -> (Controls::HTREEITEM, u32, u32) 
     let n = &*(lparam as *const Controls::NMTVITEMCHANGE);
     (n.hItem, n.uStateNew, n.uStateOld)
 }
-

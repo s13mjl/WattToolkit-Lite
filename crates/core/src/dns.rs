@@ -5,9 +5,9 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::net::IpAddr;
 #[cfg(windows)]
 use std::os::windows::io::AsRawSocket;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -18,9 +18,9 @@ pub fn system_dns_servers() -> Vec<IpAddr> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
     let mut out: Vec<IpAddr> = Vec::new();
-    let ifaces = match RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(
-        r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces",
-    ) {
+    let ifaces = match RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces")
+    {
         Ok(k) => k,
         Err(_) => return out,
     };
@@ -468,9 +468,9 @@ async fn race_doh(host: &str, skip: &str, qtype: QType) -> Vec<IpAddr> {
                 continue;
             }
             let host = host.to_string();
-            tasks.push(tokio::spawn(
-                async move { resolve_doh_typed(&host, addr, qtype).await },
-            ));
+            tasks.push(tokio::spawn(async move {
+                resolve_doh_typed(&host, addr, qtype).await
+            }));
         }
         for t in tasks {
             if let Ok(ips) = t.await {
@@ -560,7 +560,10 @@ async fn doh_query_once(host: &str, doh_address: &str, qtype: QType) -> Vec<IpAd
             .build();
         let agent: ureq::Agent = config.into();
         let mut resp = agent.get(&url).call().map_err(|e| e.to_string())?;
-        let text = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
+        let text = resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| e.to_string())?;
         serde_json::from_str(&text).map_err(|e| e.to_string())
     })
     .await
@@ -671,13 +674,7 @@ static DNS_ID: AtomicU16 = AtomicU16::new(0x1234);
 
 #[link(name = "ws2_32")]
 extern "system" {
-    fn setsockopt(
-        s: usize,
-        level: i32,
-        name: i32,
-        val: *const i32,
-        len: i32,
-    ) -> i32;
+    fn setsockopt(s: usize, level: i32, name: i32, val: *const i32, len: i32) -> i32;
 }
 const SO_REUSEADDR: i32 = 0x0004;
 const SOL_SOCKET: i32 = 0xFFFF;
@@ -739,27 +736,58 @@ fn build_a_query_with_id<'a>(
     buf: &'a mut [u8],
 ) -> Result<&'a [u8], String> {
     let mut w = 0usize;
-    buf[w] = (id >> 8) as u8; w += 1;
-    buf[w] = (id & 0xff) as u8; w += 1;
-    buf[w] = 0x01; w += 1; // RD
-    buf[w] = 0x00; w += 1;
-    buf[w] = 0x00; w += 1; buf[w] = 0x01; w += 1; // QDCOUNT=1
-    buf[w] = 0x00; w += 1; buf[w] = 0x00; w += 1; // ANCOUNT
-    buf[w] = 0x00; w += 1; buf[w] = 0x00; w += 1; // NSCOUNT
-    buf[w] = 0x00; w += 1; buf[w] = 0x00; w += 1; // ARCOUNT
+    buf[w] = (id >> 8) as u8;
+    w += 1;
+    buf[w] = (id & 0xff) as u8;
+    w += 1;
+    buf[w] = 0x01;
+    w += 1; // RD
+    buf[w] = 0x00;
+    w += 1;
+    buf[w] = 0x00;
+    w += 1;
+    buf[w] = 0x01;
+    w += 1; // QDCOUNT=1
+    buf[w] = 0x00;
+    w += 1;
+    buf[w] = 0x00;
+    w += 1; // ANCOUNT
+    buf[w] = 0x00;
+    w += 1;
+    buf[w] = 0x00;
+    w += 1; // NSCOUNT
+    buf[w] = 0x00;
+    w += 1;
+    buf[w] = 0x00;
+    w += 1; // ARCOUNT
     for label in host.split('.') {
-        if w >= buf.len() { return Err("packet too large".into()); }
-        buf[w] = label.len() as u8; w += 1;
+        if w >= buf.len() {
+            return Err("packet too large".into());
+        }
+        buf[w] = label.len() as u8;
+        w += 1;
         for b in label.bytes() {
-            if w >= buf.len() { return Err("packet too large".into()); }
-            buf[w] = b; w += 1;
+            if w >= buf.len() {
+                return Err("packet too large".into());
+            }
+            buf[w] = b;
+            w += 1;
         }
     }
-    if w >= buf.len() { return Err("packet too large".into()); }
-    buf[w] = 0x00; w += 1;
+    if w >= buf.len() {
+        return Err("packet too large".into());
+    }
+    buf[w] = 0x00;
+    w += 1;
     let ty = qtype.code().to_be_bytes();
-    buf[w] = ty[0]; w += 1; buf[w] = ty[1]; w += 1; // QTYPE
-    buf[w] = 0x00; w += 1; buf[w] = 0x01; w += 1; // QCLASS=IN
+    buf[w] = ty[0];
+    w += 1;
+    buf[w] = ty[1];
+    w += 1; // QTYPE
+    buf[w] = 0x00;
+    w += 1;
+    buf[w] = 0x01;
+    w += 1; // QCLASS=IN
     Ok(&buf[..w])
 }
 
@@ -812,7 +840,9 @@ pub async fn resolve_tcp(host: &str, server: IpAddr) -> Vec<IpAddr> {
 /// response. Records of other types (e.g. the CNAME chain) are skipped entirely,
 /// so neither addresses nor TTLs leak across families.
 fn parse_a_response(buf: &[u8], qtype: QType) -> Result<(Vec<IpAddr>, u32), String> {
-    if buf.len() < 12 { return Err("short packet".into()); }
+    if buf.len() < 12 {
+        return Err("short packet".into());
+    }
     let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
     let mut i = 12usize;
     while i < buf.len() && buf[i] != 0 {
@@ -823,7 +853,9 @@ fn parse_a_response(buf: &[u8], qtype: QType) -> Result<(Vec<IpAddr>, u32), Stri
     let mut out = Vec::new();
     let mut min_ttl = u32::MAX;
     for _ in 0..ancount {
-        if i >= buf.len() { break; }
+        if i >= buf.len() {
+            break;
+        }
         if buf[i] & 0xC0 == 0xC0 {
             i += 2;
         } else {
@@ -833,7 +865,9 @@ fn parse_a_response(buf: &[u8], qtype: QType) -> Result<(Vec<IpAddr>, u32), Stri
             }
             i += 1;
         }
-        if i + 10 > buf.len() { break; }
+        if i + 10 > buf.len() {
+            break;
+        }
         let rtype = u16::from_be_bytes([buf[i], buf[i + 1]]);
         // NAME(已跳过) TYPE(2) CLASS(2) TTL(4) RDLENGTH(2) -> TTL 在 i+4..i+8。
         let ttl = u32::from_be_bytes([buf[i + 4], buf[i + 5], buf[i + 6], buf[i + 7]]);
@@ -911,7 +945,10 @@ mod tests {
     fn parse_a_response_reports_the_lowest_ttl() {
         let buf = response_with(&[(300, 1, &[1, 2, 3, 4]), (60, 1, &[5, 6, 7, 8])]);
         let (ips, ttl) = parse_a_response(&buf, QType::A).unwrap();
-        assert_eq!(ips, vec![IpAddr::from([1, 2, 3, 4]), IpAddr::from([5, 6, 7, 8])]);
+        assert_eq!(
+            ips,
+            vec![IpAddr::from([1, 2, 3, 4]), IpAddr::from([5, 6, 7, 8])]
+        );
         assert_eq!(ttl, 60);
 
         // 没有任何回答时不报错，TTL 用 0 表示"未给出"。
@@ -963,7 +1000,11 @@ mod tests {
             QType::A,
         );
         assert!(cache_get(&key).is_none());
-        cache_put(key.clone(), &[IpAddr::from([9, 9, 9, 9])], Duration::from_secs(60));
+        cache_put(
+            key.clone(),
+            &[IpAddr::from([9, 9, 9, 9])],
+            Duration::from_secs(60),
+        );
         assert_eq!(cache_get(&key), Some(vec![IpAddr::from([9, 9, 9, 9])]));
 
         // 空回答（解析失败）不进缓存，避免把一次超时变成数分钟的解析黑洞。
@@ -979,7 +1020,11 @@ mod tests {
             CacheSource::Doh("https://doh.test/resolve".to_string()),
             QType::A,
         );
-        cache_put(expired.clone(), &[IpAddr::from([1, 1, 1, 1])], Duration::ZERO);
+        cache_put(
+            expired.clone(),
+            &[IpAddr::from([1, 1, 1, 1])],
+            Duration::ZERO,
+        );
         assert!(cache_get(&expired).is_none());
 
         // 同一个 host 由不同解析器给出，互不顶替（原项目按 (DoH 地址, host:类型) 分键）。
@@ -988,7 +1033,11 @@ mod tests {
             CacheSource::Udp(Some("5.6.7.8".parse().unwrap())),
             QType::A,
         );
-        cache_put(udp.clone(), &[IpAddr::from([2, 2, 2, 2])], Duration::from_secs(60));
+        cache_put(
+            udp.clone(),
+            &[IpAddr::from([2, 2, 2, 2])],
+            Duration::from_secs(60),
+        );
         let doh: CacheKey = (
             "src.test".to_string(),
             CacheSource::Doh("https://doh.test/resolve".to_string()),
@@ -1018,7 +1067,10 @@ mod tests {
         // 只取 A 记录（type=1）：AAAA 既不计入地址，也不参与最小 TTL。
         assert_eq!(
             parse_doh_answer(&v, QType::A),
-            (vec![IpAddr::from([1, 2, 3, 4]), IpAddr::from([5, 6, 7, 8])], 90)
+            (
+                vec![IpAddr::from([1, 2, 3, 4]), IpAddr::from([5, 6, 7, 8])],
+                90
+            )
         );
         // 同一份报文按 AAAA 解析只取 type=28 的记录（DoH 响应按端点缓存，
         // 键含查询类型，两族结果不得互相顶替）。

@@ -3,14 +3,15 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use wtlite_core::model::{
-    AccelerateProject, AccelerateProjectGroup, ExternalProxyType, ProxyMode,
-};
+use wtlite_core::model::{AccelerateProject, AccelerateProjectGroup, ExternalProxyType, ProxyMode};
 use wtlite_core::settings::ProxySettings;
 
 /// Domains in a semicolon-separated manifest field.
 pub fn count_domains(s: &str) -> usize {
-    s.split(';').map(|x| x.trim()).filter(|x| !x.is_empty()).count()
+    s.split(';')
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .count()
 }
 
 /// (enabled leaves, total leaves) under a project.
@@ -34,13 +35,10 @@ pub fn count_group_leaves(g: &AccelerateProjectGroup) -> usize {
 }
 
 pub fn group_enabled(g: &AccelerateProjectGroup) -> bool {
-    let (on, total) = g
-        .items
-        .iter()
-        .fold((0, 0), |(on, total), p| {
-            let (o, t) = project_counts(p);
-            (on + o, total + t)
-        });
+    let (on, total) = g.items.iter().fold((0, 0), |(on, total), p| {
+        let (o, t) = project_counts(p);
+        (on + o, total + t)
+    });
     total > 0 && on == total
 }
 
@@ -82,13 +80,10 @@ fn derive(p: &mut AccelerateProject) -> (usize, usize) {
     if p.items.is_empty() {
         return (usize::from(p.three_state_enable == Some(true)), 1);
     }
-    let (on, total) = p
-        .items
-        .iter_mut()
-        .fold((0, 0), |(on, total), c| {
-            let (o, t) = derive(c);
-            (on + o, total + t)
-        });
+    let (on, total) = p.items.iter_mut().fold((0, 0), |(on, total), c| {
+        let (o, t) = derive(c);
+        (on + o, total + t)
+    });
     p.three_state_enable = if on == 0 {
         Some(false)
     } else if on == total {
@@ -216,10 +211,7 @@ pub fn logs_text(logs: &VecDeque<String>) -> String {
 }
 
 /// Sorted traffic snapshot: total bytes plus (domain, bytes) descending.
-pub fn traffic_snapshot(
-    total: u64,
-    by_domain: &HashMap<String, u64>,
-) -> (u64, Vec<(String, u64)>) {
+pub fn traffic_snapshot(total: u64, by_domain: &HashMap<String, u64>) -> (u64, Vec<(String, u64)>) {
     let mut rows: Vec<(String, u64)> = by_domain.iter().map(|(k, v)| (k.clone(), *v)).collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     (total, rows)

@@ -24,8 +24,6 @@ use crate::ui::Ui;
 use crate::win32::{self, controls, Fonts, Icons};
 use crate::{ids, tray};
 
-const HOSTS_PATH: &str = r"C:\Windows\System32\drivers\etc\hosts";
-
 thread_local! {
     static STATUS_RUNNING: Cell<bool> = const { Cell::new(false) };
 }
@@ -33,7 +31,6 @@ thread_local! {
 pub fn status_running() -> bool {
     STATUS_RUNNING.with(|s| s.get())
 }
-
 
 pub struct App {
     pub hwnd: HWND,
@@ -142,9 +139,16 @@ impl App {
             | windows_sys::Win32::System::SystemServices::SS_CENTERIMAGE;
         let ss_status = windows_sys::Win32::System::SystemServices::SS_RIGHT
             | windows_sys::Win32::System::SystemServices::SS_CENTERIMAGE;
-        self.ui.title = pages::label(h, "WattToolkit-Lite", ss_title, ids::TITLE, self.fonts.title);
+        self.ui.title = pages::label(
+            h,
+            "WattToolkit-Lite",
+            ss_title,
+            ids::TITLE,
+            self.fonts.title,
+        );
         self.ui.status = pages::label(h, "已停止", ss_status, ids::STATUS, self.fonts.ui);
-        self.ui.main_tabs = controls::make_tabs(h, ids::MAIN_TABS, win32::Rect::default(), self.fonts.ui);
+        self.ui.main_tabs =
+            controls::make_tabs(h, ids::MAIN_TABS, win32::Rect::default(), self.fonts.ui);
         controls::tabs_add(self.ui.main_tabs, &["网络加速", "设置"]);
         controls::tabs_set_sel(self.ui.main_tabs, 0);
 
@@ -157,9 +161,15 @@ impl App {
     }
 
     pub unsafe fn layout(&mut self) {
+        self.ui.layout(
+            self.hwnd,
+            self.dpi,
+            self.main_tab,
+            self.acc_tab,
+            self.settings_tab,
+        );
         self.ui
-            .layout(self.hwnd, self.dpi, self.main_tab, self.acc_tab, self.settings_tab);
-        self.ui.apply_visibility(self.main_tab, self.acc_tab, self.settings_tab);
+            .apply_visibility(self.main_tab, self.acc_tab, self.settings_tab);
     }
 
     pub unsafe fn refresh_status(&mut self) {
@@ -167,7 +177,14 @@ impl App {
         self.running = running;
         STATUS_RUNNING.with(|s| s.set(running));
         win32::set_text(self.ui.status, if running { "运行中" } else { "已停止" });
-        win32::set_text(self.ui.start, if running { "停止加速" } else { "启动加速" });
+        win32::set_text(
+            self.ui.start,
+            if running {
+                "停止加速"
+            } else {
+                "启动加速"
+            },
+        );
         win32::invalidate(self.ui.status);
         win32::invalidate(self.ui.start);
     }
@@ -287,12 +304,13 @@ impl App {
             }
             ids::CERT_OPEN_DIR => {
                 self.queue(Action::ShellOpen(
-                    wtlite_core::paths::cert_dir().to_string_lossy().into_owned(),
+                    wtlite_core::paths::cert_dir()
+                        .to_string_lossy()
+                        .into_owned(),
                 ));
             }
-            ids::HOSTS_EDIT | ids::HOSTS_OPEN => {
-                self.queue(Action::ShellOpen(HOSTS_PATH.to_string()));
-            }
+            ids::HOSTS_EDIT => self.queue(Action::OpenHostsEditor),
+            ids::HOSTS_OPEN => self.queue(Action::RevealHosts),
             ids::HOSTS_RESET => self.queue(Action::HostsReset),
             ids::OPEN_LOG_DIR => {
                 self.queue(Action::ShellOpen(
@@ -363,7 +381,9 @@ impl App {
                 self.queue(Action::ShellOpen(pages::settings::UPSTREAM_REPO_URL.into()));
             }
             ids::ABOUT_SECONDARY => {
-                self.queue(Action::ShellOpen(pages::settings::SECONDARY_REPO_URL.into()));
+                self.queue(Action::ShellOpen(
+                    pages::settings::SECONDARY_REPO_URL.into(),
+                ));
             }
             _ => {}
         }
@@ -397,8 +417,7 @@ impl App {
             return 0;
         }
         if id == ids::SETTINGS_TABS && code == Controls::TCN_SELCHANGE {
-            self.settings_tab =
-                SettingsTab::from_index(controls::tabs_sel(self.ui.settings_tabs));
+            self.settings_tab = SettingsTab::from_index(controls::tabs_sel(self.ui.settings_tabs));
             pages::settings::sync(self);
             self.layout();
             return 0;
@@ -451,13 +470,15 @@ impl App {
         let settings = self.settings.proxy.clone();
         let groups = self.groups.clone();
         let err = self.start_error.clone();
-        std::thread::spawn(move || match proxy.start_blocking(mode, &settings, &groups) {
-            Ok(()) => log::info!("proxy started ({mode:?})"),
-            Err(e) => {
-                log::error!("proxy start failed: {e}");
-                *err.lock().unwrap() = Some(e);
-            }
-        });
+        std::thread::spawn(
+            move || match proxy.start_blocking(mode, &settings, &groups) {
+                Ok(()) => log::info!("proxy started ({mode:?})"),
+                Err(e) => {
+                    log::error!("proxy start failed: {e}");
+                    *err.lock().unwrap() = Some(e);
+                }
+            },
+        );
     }
 
     pub unsafe fn start_accel(&mut self) {

@@ -76,8 +76,8 @@ impl CertificateManager {
             let key = std::fs::read(key_path()).ok()?;
             if let Ok((_, parsed)) = x509_parser::parse_x509_certificate(&cer) {
                 let dt = parsed.tbs_certificate.validity.not_after.to_datetime();
-                let not_after = SystemTime::UNIX_EPOCH
-                    + Duration::from_secs(dt.unix_timestamp().max(0) as u64);
+                let not_after =
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(dt.unix_timestamp().max(0) as u64);
                 let rc = RootCertificate {
                     der: cer,
                     key_pkcs8: key,
@@ -109,7 +109,8 @@ impl CertificateManager {
         params.not_after = now + time::Duration::days(CERT_VALID_DAYS);
         let cert = params.self_signed(&key).map_err(|e| e.to_string())?;
 
-        let not_after_sys = SystemTime::now() + Duration::from_secs((CERT_VALID_DAYS as u64) * 86400);
+        let not_after_sys =
+            SystemTime::now() + Duration::from_secs((CERT_VALID_DAYS as u64) * 86400);
         let rc = RootCertificate {
             der: cert.der().to_vec(),
             key_pkcs8: key.serialize_der(),
@@ -144,14 +145,10 @@ impl CertificateManager {
             &PKCS_ECDSA_P256_SHA256,
         )
         .map_err(|e| e.to_string())?;
-        let issuer = Issuer::from_ca_cert_der(
-            &CertificateDer::from(rc.der.clone()),
-            root_key,
-        )
-        .map_err(|e| e.to_string())?;
+        let issuer = Issuer::from_ca_cert_der(&CertificateDer::from(rc.der.clone()), root_key)
+            .map_err(|e| e.to_string())?;
 
-        let leaf_key =
-            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|e| e.to_string())?;
+        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|e| e.to_string())?;
         let mut params =
             CertificateParams::new(vec![sni.to_string()]).map_err(|e| e.to_string())?;
         let mut dn = DistinguishedName::new();
@@ -165,7 +162,9 @@ impl CertificateManager {
             rcgen::KeyUsagePurpose::DigitalSignature,
             rcgen::KeyUsagePurpose::KeyEncipherment,
         ];
-        let cert = params.signed_by(&leaf_key, &issuer).map_err(|e| e.to_string())?;
+        let cert = params
+            .signed_by(&leaf_key, &issuer)
+            .map_err(|e| e.to_string())?;
         Ok((cert.der().to_vec(), leaf_key.serialize_der()))
     }
 

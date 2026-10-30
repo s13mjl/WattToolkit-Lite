@@ -69,7 +69,12 @@ impl Rect {
     }
 
     pub fn inset(&self, d: i32) -> Self {
-        Self::new(self.x + d, self.y + d, (self.w - d * 2).max(0), (self.h - d * 2).max(0))
+        Self::new(
+            self.x + d,
+            self.y + d,
+            (self.w - d * 2).max(0),
+            (self.h - d * 2).max(0),
+        )
     }
 
     pub fn to_win_rect(&self) -> RECT {
@@ -245,7 +250,11 @@ pub unsafe fn set_check(hwnd: HWND, on: bool) {
     wm::SendMessageW(
         hwnd,
         wm::BM_SETCHECK,
-        if on { Controls::BST_CHECKED as usize } else { 0 },
+        if on {
+            Controls::BST_CHECKED as usize
+        } else {
+            0
+        },
         0,
     );
 }
@@ -355,14 +364,36 @@ impl Fonts {
     }
 
     pub unsafe fn destroy(&self) {
-        for f in [self.ui, self.bold, self.button, self.title, self.mono, self.log, self.toast, self.link] {
+        for f in [
+            self.ui,
+            self.bold,
+            self.button,
+            self.title,
+            self.mono,
+            self.log,
+            self.toast,
+            self.link,
+        ] {
             delete_object(f);
         }
     }
 }
 
-unsafe fn make_font(height: i32, weight: i32, face: &str, underline: bool, italic: bool) -> Gdi::HFONT {
-    make_font_quality(height, weight, face, underline, italic, Gdi::CLEARTYPE_QUALITY)
+unsafe fn make_font(
+    height: i32,
+    weight: i32,
+    face: &str,
+    underline: bool,
+    italic: bool,
+) -> Gdi::HFONT {
+    make_font_quality(
+        height,
+        weight,
+        face,
+        underline,
+        italic,
+        Gdi::CLEARTYPE_QUALITY,
+    )
 }
 
 unsafe fn make_font_quality(
@@ -483,7 +514,12 @@ unsafe fn make_hicon(rgba: &[u8], sw: u32, sh: u32, size: u32) -> Option<wm::HIC
     if !mem.is_null() {
         let old = Gdi::SelectObject(mem, mask as Gdi::HGDIOBJ);
         let black = Gdi::CreateSolidBrush(0);
-        let rc = RECT { left: 0, top: 0, right: size as i32, bottom: size as i32 };
+        let rc = RECT {
+            left: 0,
+            top: 0,
+            right: size as i32,
+            bottom: size as i32,
+        };
         Gdi::FillRect(mem, &rc, black);
         Gdi::DeleteObject(black as Gdi::HGDIOBJ);
         Gdi::SelectObject(mem, old);
@@ -508,7 +544,12 @@ unsafe fn make_hicon(rgba: &[u8], sw: u32, sh: u32, size: u32) -> Option<wm::HIC
 }
 
 pub fn screen_size() -> (i32, i32) {
-    unsafe { (wm::GetSystemMetrics(wm::SM_CXSCREEN), wm::GetSystemMetrics(wm::SM_CYSCREEN)) }
+    unsafe {
+        (
+            wm::GetSystemMetrics(wm::SM_CXSCREEN),
+            wm::GetSystemMetrics(wm::SM_CYSCREEN),
+        )
+    }
 }
 
 pub fn dpi() -> u32 {
@@ -561,7 +602,12 @@ pub unsafe fn client_rect(hwnd: HWND) -> Rect {
 
 pub unsafe fn set_window_icons(hwnd: HWND, big: wm::HICON, small: wm::HICON) {
     wm::SendMessageW(hwnd, wm::WM_SETICON, wm::ICON_BIG as usize, big as isize);
-    wm::SendMessageW(hwnd, wm::WM_SETICON, wm::ICON_SMALL as usize, small as isize);
+    wm::SendMessageW(
+        hwnd,
+        wm::WM_SETICON,
+        wm::ICON_SMALL as usize,
+        small as isize,
+    );
 }
 
 pub fn is_ctrl_id(hwnd: HWND, id: i32) -> bool {
@@ -575,4 +621,3 @@ pub fn wparam_id(wparam: WPARAM) -> i32 {
 pub fn wparam_code(wparam: WPARAM) -> u32 {
     ((wparam >> 16) & 0xffff) as u32
 }
-

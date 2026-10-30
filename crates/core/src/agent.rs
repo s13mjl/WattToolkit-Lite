@@ -89,7 +89,9 @@ where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     match proxy_type {
-        ExternalProxyType::Http => connect_http(stream, target_host, target_port, credentials).await,
+        ExternalProxyType::Http => {
+            connect_http(stream, target_host, target_port, credentials).await
+        }
         ExternalProxyType::Socks4 => {
             connect_socks4(stream, target_host, target_port, credentials).await
         }
@@ -182,7 +184,9 @@ where
     // Byte 1 is the reply code, byte 0 the (unused) version.
     let code = answer[1];
     if code != 0x5A {
-        return Err(AgentError::Refused(format!("SOCKS4 reply code 0x{code:02X}")));
+        return Err(AgentError::Refused(format!(
+            "SOCKS4 reply code 0x{code:02X}"
+        )));
     }
     Ok(())
 }
@@ -293,15 +297,15 @@ where
         }
     }
     request.extend_from_slice(&target_port.to_be_bytes());
-    stream
-        .write_all(&request)
-        .await
-        .map_err(AgentError::Io)?;
+    stream.write_all(&request).await.map_err(AgentError::Io)?;
 
     // Reply head plus the bound address, whose length its ATYP announces - the
     // original reads a fixed 10 bytes (L243) and mis-parses other forms.
     let mut reply = [0u8; 4];
-    stream.read_exact(&mut reply).await.map_err(AgentError::Io)?;
+    stream
+        .read_exact(&mut reply)
+        .await
+        .map_err(AgentError::Io)?;
     let version = reply[0];
     if version != 0x05 {
         return Err(AgentError::Protocol(format!(
@@ -310,7 +314,9 @@ where
     }
     let code = reply[1];
     if code != 0x00 {
-        return Err(AgentError::Refused(format!("SOCKS5 reply code 0x{code:02X}")));
+        return Err(AgentError::Refused(format!(
+            "SOCKS5 reply code 0x{code:02X}"
+        )));
     }
     let bound_len = match reply[3] {
         0x01 => 4,
@@ -329,7 +335,10 @@ where
     // Neither the bound address nor the bound port is used, but both must be
     // drained so the tunnel starts at the payload.
     let mut bound = vec![0u8; bound_len + 2];
-    stream.read_exact(&mut bound).await.map_err(AgentError::Io)?;
+    stream
+        .read_exact(&mut bound)
+        .await
+        .map_err(AgentError::Io)?;
     Ok(())
 }
 
@@ -358,7 +367,9 @@ where
             return Ok(head);
         }
         if head.len() >= MAX_HEAD {
-            return Err(AgentError::Protocol("agent answer head is oversized".into()));
+            return Err(AgentError::Protocol(
+                "agent answer head is oversized".into(),
+            ));
         }
     }
 }
@@ -682,10 +693,8 @@ mod tests {
 
     #[tokio::test]
     async fn socks4_denied_reply_is_refused() {
-        let agent = FakeAgent::start(vec![Step::Socks4Request(
-            &[0x00, 0x5B, 0, 0, 0, 0, 0, 0],
-        )])
-        .await;
+        let agent =
+            FakeAgent::start(vec![Step::Socks4Request(&[0x00, 0x5B, 0, 0, 0, 0, 0, 0])]).await;
         let mut stream = agent.connect().await;
         let err = run(
             &mut stream,

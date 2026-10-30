@@ -1,7 +1,19 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="WattToolkit.Lite" version="1.0.0.0" processorArchitecture="*"/>
+  <assemblyIdentity type="win32" name="WattToolkit.Lite" version="1.1.0.0" processorArchitecture="*"/>
   <description>WattToolkit-Lite</description>
+  <!-- The original AppHost manifest requires administrator. Hosts mode writes
+       %SystemRoot%\System32\drivers\etc\hosts, DNS intercept loads the
+       WinDivert driver and certificate install touches the machine store, so
+       the whole process must start elevated. Without this the hosts write
+       fails with os error 5 (access denied). -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"

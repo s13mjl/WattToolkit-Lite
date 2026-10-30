@@ -25,7 +25,12 @@ fn icon_png_path() -> std::path::PathBuf {
 fn recolor(img: &RgbaImage) -> RgbaImage {
     let mut out = RgbaImage::new(img.width(), img.height());
     for (x, y, px) in img.enumerate_pixels() {
-        let (r, g, b, a) = (px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3]);
+        let (r, g, b, a) = (
+            px[0] as f32 / 255.0,
+            px[1] as f32 / 255.0,
+            px[2] as f32 / 255.0,
+            px[3],
+        );
         let (hr, hg, hb) = rgb_to_hsv(r, g, b);
         // If the pixel is bluish (hue 0.5..0.78), rotate toward green (~0.36).
         let nh = if hr >= 0.5 && hr <= 0.78 && hb > 0.15 {
@@ -34,7 +39,16 @@ fn recolor(img: &RgbaImage) -> RgbaImage {
             hr
         };
         let (nr, ng, nb) = hsv_to_rgb(nh, hg, hb);
-        out.put_pixel(x, y, Rgba([(nr * 255.0) as u8, (ng * 255.0) as u8, (nb * 255.0) as u8, a]));
+        out.put_pixel(
+            x,
+            y,
+            Rgba([
+                (nr * 255.0) as u8,
+                (ng * 255.0) as u8,
+                (nb * 255.0) as u8,
+                a,
+            ]),
+        );
     }
     out
 }
@@ -47,7 +61,11 @@ fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     if d == 0.0 {
         return (0.0, 0.0, l);
     }
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
     let h = if max == r {
         (((g - b) / d) % 6.0) / 6.0
     } else if max == g {
@@ -63,14 +81,29 @@ fn hsv_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s == 0.0 {
         return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let f = |t: f32| -> f32 {
-        let t = if t < 0.0 { t + 1.0 } else if t > 1.0 { t - 1.0 } else { t };
-        if t < 1.0 / 6.0 { p + (q - p) * 6.0 * t }
-        else if t < 0.5 { q }
-        else if t < 2.0 / 3.0 { p + (q - p) * (2.0 / 3.0 - t) * 6.0 }
-        else { p }
+        let t = if t < 0.0 {
+            t + 1.0
+        } else if t > 1.0 {
+            t - 1.0
+        } else {
+            t
+        };
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
     };
     (f(h + 1.0 / 3.0), f(h), f(h - 1.0 / 3.0))
 }
@@ -90,7 +123,8 @@ fn load_icon() -> Option<RgbaImage> {
     let rec = recolor(&rgba);
     // Downscale to 256 for the about page / window icon.
     let rec = image::imageops::resize(&rec, 256, 256, image::imageops::FilterType::Lanczos3);
-    let _ = image::DynamicImage::ImageRgba8(rec.clone()).save_with_format(&png_path, image::ImageFormat::Png);
+    let _ = image::DynamicImage::ImageRgba8(rec.clone())
+        .save_with_format(&png_path, image::ImageFormat::Png);
     Some(rec)
 }
 

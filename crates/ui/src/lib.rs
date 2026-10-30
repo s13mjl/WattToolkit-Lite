@@ -193,7 +193,12 @@ unsafe fn ctl_color_edit(wparam: WPARAM) -> LRESULT {
     Gdi::GetSysColorBrush(Gdi::COLOR_WINDOW) as LRESULT
 }
 
-unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn main_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         wm::WM_CREATE => {
             with_app(|app| {
@@ -340,10 +345,8 @@ pub fn run(icon: IconData) -> Result<(), String> {
         with_app(|a| a.layout());
         wm::SetTimer(hwnd, win32::TIMER_UI, 300, None);
 
-        let minimize = with_app(|a| {
-            a.settings.general.minimize_on_startup && a.tray_enabled
-        })
-        .unwrap_or(false);
+        let minimize =
+            with_app(|a| a.settings.general.minimize_on_startup && a.tray_enabled).unwrap_or(false);
         if minimize {
             with_app(|a| a.hidden_to_tray = true);
         } else {

@@ -105,7 +105,10 @@ impl Ui {
     ) {
         let s = |v: i32| win32::scale(dpi, v);
         let c = win32::client_rect(main);
-        win32::place(self.title, Rect::new(s(16), s(10), (c.w / 2).max(s(200)), s(28)));
+        win32::place(
+            self.title,
+            Rect::new(s(16), s(10), (c.w / 2).max(s(200)), s(28)),
+        );
         win32::place(self.status, Rect::new(c.w - s(136), s(10), s(120), s(28)));
         let main_tabs = Rect::new(s(12), s(44), (c.w - s(24)).max(0), (c.h - s(52)).max(0));
         win32::place(self.main_tabs, main_tabs);
@@ -171,86 +174,223 @@ impl Ui {
 
     unsafe fn place_right_panel(&self, s: impl Fn(i32) -> i32, x: i32, y: i32) {
         let w = s(280);
-        win32::place(self.accel_heading, Rect::new(x + s(8), y + s(8), w - s(16), s(22)));
-        win32::place(self.start, Rect::new(x + s(20), y + s(36), w - s(40), s(38)));
-        win32::place(self.mode_label, Rect::new(x + s(8), y + s(90), s(70), s(24)));
-        win32::place(self.mode_combo, Rect::new(x + s(80), y + s(88), w - s(96), s(200)));
-        win32::place(self.proxy_settings, Rect::new(x + s(20), y + s(124), w - s(40), s(28)));
-        win32::place(self.cert_heading, Rect::new(x + s(8), y + s(164), w - s(16), s(22)));
-        win32::place(self.cert_install, Rect::new(x + s(8), y + s(190), s(128), s(26)));
-        win32::place(self.cert_remove, Rect::new(x + s(144), y + s(190), s(128), s(26)));
-        win32::place(self.cert_view, Rect::new(x + s(8), y + s(222), s(128), s(26)));
-        win32::place(self.cert_open_dir, Rect::new(x + s(144), y + s(222), s(128), s(26)));
-        win32::place(self.hosts_heading, Rect::new(x + s(8), y + s(260), w - s(16), s(22)));
-        win32::place(self.hosts_edit, Rect::new(x + s(8), y + s(286), s(80), s(26)));
-        win32::place(self.hosts_reset, Rect::new(x + s(96), y + s(286), s(80), s(26)));
-        win32::place(self.hosts_open, Rect::new(x + s(184), y + s(286), s(80), s(26)));
-        win32::place(self.open_log_dir, Rect::new(x + s(20), y + s(324), w - s(40), s(28)));
+        win32::place(
+            self.accel_heading,
+            Rect::new(x + s(8), y + s(8), w - s(16), s(22)),
+        );
+        win32::place(
+            self.start,
+            Rect::new(x + s(20), y + s(36), w - s(40), s(38)),
+        );
+        win32::place(
+            self.mode_label,
+            Rect::new(x + s(8), y + s(90), s(70), s(24)),
+        );
+        win32::place(
+            self.mode_combo,
+            Rect::new(x + s(80), y + s(88), w - s(96), s(200)),
+        );
+        win32::place(
+            self.proxy_settings,
+            Rect::new(x + s(20), y + s(124), w - s(40), s(28)),
+        );
+        win32::place(
+            self.cert_heading,
+            Rect::new(x + s(8), y + s(164), w - s(16), s(22)),
+        );
+        win32::place(
+            self.cert_install,
+            Rect::new(x + s(8), y + s(190), s(128), s(26)),
+        );
+        win32::place(
+            self.cert_remove,
+            Rect::new(x + s(144), y + s(190), s(128), s(26)),
+        );
+        win32::place(
+            self.cert_view,
+            Rect::new(x + s(8), y + s(222), s(128), s(26)),
+        );
+        win32::place(
+            self.cert_open_dir,
+            Rect::new(x + s(144), y + s(222), s(128), s(26)),
+        );
+        win32::place(
+            self.hosts_heading,
+            Rect::new(x + s(8), y + s(260), w - s(16), s(22)),
+        );
+        win32::place(
+            self.hosts_edit,
+            Rect::new(x + s(8), y + s(286), s(80), s(26)),
+        );
+        win32::place(
+            self.hosts_reset,
+            Rect::new(x + s(96), y + s(286), s(80), s(26)),
+        );
+        win32::place(
+            self.hosts_open,
+            Rect::new(x + s(184), y + s(286), s(80), s(26)),
+        );
+        win32::place(
+            self.open_log_dir,
+            Rect::new(x + s(20), y + s(324), w - s(40), s(28)),
+        );
     }
 
     unsafe fn place_acc_pages(&self, s: impl Fn(i32) -> i32, r: Rect) {
         win32::place(self.platform_tree, r.inset(s(4)));
         win32::place(self.services_tree, r.inset(s(4)));
 
-        win32::place(self.script_enable, Rect::new(r.x + s(16), r.y + s(16), s(260), s(26)));
+        win32::place(
+            self.script_enable,
+            Rect::new(r.x + s(16), r.y + s(16), s(260), s(26)),
+        );
         win32::place(
             self.script_desc,
             Rect::new(r.x + s(16), r.y + s(48), (r.w - s(32)).max(0), s(60)),
         );
 
-        win32::place(self.logs_clear, Rect::new(r.x + s(8), r.y + s(8), s(90), s(28)));
-        win32::place(self.logs_label, Rect::new(r.x + s(110), r.y + s(12), (r.w - s(120)).max(0), s(22)));
+        win32::place(
+            self.logs_clear,
+            Rect::new(r.x + s(8), r.y + s(8), s(90), s(28)),
+        );
+        win32::place(
+            self.logs_label,
+            Rect::new(r.x + s(110), r.y + s(12), (r.w - s(120)).max(0), s(22)),
+        );
         win32::place(
             self.logs_edit,
-            Rect::new(r.x + s(8), r.y + s(42), (r.w - s(16)).max(0), (r.h - s(50)).max(0)),
+            Rect::new(
+                r.x + s(8),
+                r.y + s(42),
+                (r.w - s(16)).max(0),
+                (r.h - s(50)).max(0),
+            ),
         );
         win32::set_round_region(self.logs_edit, s(10));
         win32::set_edit_padding(self.logs_edit, s(12), s(10), s(12), s(10));
 
-        win32::place(self.traffic_total, Rect::new(r.x + s(8), r.y + s(10), (r.w - s(16)).max(0), s(22)));
+        win32::place(
+            self.traffic_total,
+            Rect::new(r.x + s(8), r.y + s(10), (r.w - s(16)).max(0), s(22)),
+        );
         win32::place(
             self.traffic_list,
-            Rect::new(r.x + s(8), r.y + s(38), (r.w - s(16)).max(0), (r.h - s(46)).max(0)),
+            Rect::new(
+                r.x + s(8),
+                r.y + s(38),
+                (r.w - s(16)).max(0),
+                (r.h - s(46)).max(0),
+            ),
         );
 
-        win32::place(self.nettest_start, Rect::new(r.x + s(8), r.y + s(8), s(120), s(28)));
-        win32::place(self.nettest_hint, Rect::new(r.x + s(136), r.y + s(12), (r.w - s(144)).max(0), s(22)));
+        win32::place(
+            self.nettest_start,
+            Rect::new(r.x + s(8), r.y + s(8), s(120), s(28)),
+        );
+        win32::place(
+            self.nettest_hint,
+            Rect::new(r.x + s(136), r.y + s(12), (r.w - s(144)).max(0), s(22)),
+        );
         win32::place(
             self.nettest_list,
-            Rect::new(r.x + s(8), r.y + s(44), (r.w - s(16)).max(0), (r.h - s(52)).max(0)),
+            Rect::new(
+                r.x + s(8),
+                r.y + s(44),
+                (r.w - s(16)).max(0),
+                (r.h - s(52)).max(0),
+            ),
         );
     }
 
     unsafe fn place_settings_pages(&self, s: impl Fn(i32) -> i32, r: Rect, display: Rect) {
         let w = (r.w - s(40)).max(s(180));
-        win32::place(self.gen_autorun, Rect::new(r.x + s(20), r.y + s(20), w, s(26)));
-        win32::place(self.gen_minimize, Rect::new(r.x + s(20), r.y + s(52), w, s(26)));
+        win32::place(
+            self.gen_autorun,
+            Rect::new(r.x + s(20), r.y + s(20), w, s(26)),
+        );
+        win32::place(
+            self.gen_minimize,
+            Rect::new(r.x + s(20), r.y + s(52), w, s(26)),
+        );
         win32::place(self.gen_tray, Rect::new(r.x + s(20), r.y + s(84), w, s(26)));
         win32::place(self.gen_gpu, Rect::new(r.x + s(20), r.y + s(116), w, s(26)));
-        win32::place(self.gen_save, Rect::new(r.x + s(20), r.y + s(160), s(90), s(30)));
+        win32::place(
+            self.gen_save,
+            Rect::new(r.x + s(20), r.y + s(160), s(90), s(30)),
+        );
 
-        win32::place(self.accel_mode_label, Rect::new(r.x + s(20), r.y + s(22), s(120), s(24)));
-        win32::place(self.accel_mode_combo, Rect::new(r.x + s(146), r.y + s(20), s(190), s(200)));
-        win32::place(self.accel_startup_run, Rect::new(r.x + s(20), r.y + s(60), w, s(26)));
-        win32::place(self.accel_http_https, Rect::new(r.x + s(20), r.y + s(92), w, s(26)));
-        win32::place(self.accel_script, Rect::new(r.x + s(20), r.y + s(124), w, s(26)));
-        win32::place(self.accel_save, Rect::new(r.x + s(20), r.y + s(168), s(90), s(30)));
+        win32::place(
+            self.accel_mode_label,
+            Rect::new(r.x + s(20), r.y + s(22), s(120), s(24)),
+        );
+        win32::place(
+            self.accel_mode_combo,
+            Rect::new(r.x + s(146), r.y + s(20), s(190), s(200)),
+        );
+        win32::place(
+            self.accel_startup_run,
+            Rect::new(r.x + s(20), r.y + s(60), w, s(26)),
+        );
+        win32::place(
+            self.accel_http_https,
+            Rect::new(r.x + s(20), r.y + s(92), w, s(26)),
+        );
+        win32::place(
+            self.accel_script,
+            Rect::new(r.x + s(20), r.y + s(124), w, s(26)),
+        );
+        win32::place(
+            self.accel_save,
+            Rect::new(r.x + s(20), r.y + s(168), s(90), s(30)),
+        );
 
         let cx = display.x + display.w / 2;
-        win32::place(self.about_icon, Rect::new(cx - s(32), r.y + s(16), s(64), s(64)));
-        win32::place(self.about_name, Rect::new(cx - s(150), r.y + s(92), s(300), s(26)));
-        win32::place(self.about_version, Rect::new(cx - s(150), r.y + s(120), s(300), s(22)));
+        win32::place(
+            self.about_icon,
+            Rect::new(cx - s(32), r.y + s(16), s(64), s(64)),
+        );
+        win32::place(
+            self.about_name,
+            Rect::new(cx - s(150), r.y + s(92), s(300), s(26)),
+        );
+        win32::place(
+            self.about_version,
+            Rect::new(cx - s(150), r.y + s(120), s(300), s(22)),
+        );
         let row_x = r.x + s(20);
         let row_w = (r.w - s(40)).max(s(180));
-        win32::place(self.about_license_label, Rect::new(row_x, r.y + s(156), s(110), s(22)));
-        win32::place(self.about_license, Rect::new(row_x + s(110), r.y + s(156), row_w - s(110), s(22)));
-        win32::place(self.about_upstream_label, Rect::new(row_x, r.y + s(184), s(110), s(22)));
-        win32::place(self.about_upstream, Rect::new(row_x + s(110), r.y + s(184), row_w - s(110), s(22)));
-        win32::place(self.about_secondary_label, Rect::new(row_x, r.y + s(212), s(110), s(22)));
-        win32::place(self.about_secondary, Rect::new(row_x + s(110), r.y + s(212), row_w - s(110), s(22)));
+        win32::place(
+            self.about_license_label,
+            Rect::new(row_x, r.y + s(156), s(110), s(22)),
+        );
+        win32::place(
+            self.about_license,
+            Rect::new(row_x + s(110), r.y + s(156), row_w - s(110), s(22)),
+        );
+        win32::place(
+            self.about_upstream_label,
+            Rect::new(row_x, r.y + s(184), s(110), s(22)),
+        );
+        win32::place(
+            self.about_upstream,
+            Rect::new(row_x + s(110), r.y + s(184), row_w - s(110), s(22)),
+        );
+        win32::place(
+            self.about_secondary_label,
+            Rect::new(row_x, r.y + s(212), s(110), s(22)),
+        );
+        win32::place(
+            self.about_secondary,
+            Rect::new(row_x + s(110), r.y + s(212), row_w - s(110), s(22)),
+        );
         win32::place(
             self.about_desc,
-            Rect::new(row_x, r.y + s(248), row_w, (r.h - s(256)).clamp(s(40), s(80))),
+            Rect::new(
+                row_x,
+                r.y + s(248),
+                row_w,
+                (r.h - s(256)).clamp(s(40), s(80)),
+            ),
         );
     }
 

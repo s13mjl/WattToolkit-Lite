@@ -27,9 +27,13 @@ pub unsafe fn build(app: &mut App) {
     app.ui.gen_gpu = crate::pages::checkbox(h, "使用 GPU 加速渲染", ids::GEN_GPU, ui);
     app.ui.gen_save = crate::pages::button(h, "保存", ids::GEN_SAVE, ui);
 
-    app.ui.accel_mode_label = crate::pages::left_label(h, "默认加速模式:", ids::ACCEL_MODE_LABEL, ui);
+    app.ui.accel_mode_label =
+        crate::pages::left_label(h, "默认加速模式:", ids::ACCEL_MODE_LABEL, ui);
     app.ui.accel_mode_combo = crate::pages::combo(h, ids::ACCEL_MODE_COMBO, ui, false);
-    let modes: Vec<&str> = ProxyMode::available().iter().map(|m| m.display_name()).collect();
+    let modes: Vec<&str> = ProxyMode::available()
+        .iter()
+        .map(|m| m.display_name())
+        .collect();
     win32::combo_fill(app.ui.accel_mode_combo, &modes);
     app.ui.accel_startup_run =
         crate::pages::checkbox(h, "程序启动时自动运行加速", ids::ACCEL_STARTUP_RUN, ui);
@@ -52,10 +56,13 @@ pub unsafe fn build(app: &mut App) {
         ids::ABOUT_VERSION,
         ui,
     );
-    app.ui.about_license_label = crate::pages::left_label(h, "许可证:", ids::ABOUT_LICENSE_LABEL, ui);
+    app.ui.about_license_label =
+        crate::pages::left_label(h, "许可证:", ids::ABOUT_LICENSE_LABEL, ui);
     app.ui.about_license = crate::pages::left_label(h, "GPL-3.0-or-later", ids::ABOUT_LICENSE, ui);
-    app.ui.about_upstream_label = crate::pages::left_label(h, "上游项目:", ids::ABOUT_UPSTREAM_LABEL, ui);
-    app.ui.about_upstream = crate::pages::link_label(h, UPSTREAM_REPO_URL, ids::ABOUT_UPSTREAM, link);
+    app.ui.about_upstream_label =
+        crate::pages::left_label(h, "上游项目:", ids::ABOUT_UPSTREAM_LABEL, ui);
+    app.ui.about_upstream =
+        crate::pages::link_label(h, UPSTREAM_REPO_URL, ids::ABOUT_UPSTREAM, link);
     app.ui.about_secondary_label =
         crate::pages::left_label(h, "二次开发:", ids::ABOUT_SECONDARY_LABEL, ui);
     app.ui.about_secondary =

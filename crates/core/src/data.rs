@@ -87,7 +87,12 @@ pub fn built_in_groups() -> Vec<AccelerateProjectGroup> {
                     "steamcommunity-a.akamaihd.net",
                 ),
                 leaf("steam-image", "Steam 图片", 1, "steamcdn-a.akamaihd.net"),
-                leaf("steam-static", "Steam 静态资源", 2, "community.steamstatic.com"),
+                leaf(
+                    "steam-static",
+                    "Steam 静态资源",
+                    2,
+                    "community.steamstatic.com",
+                ),
                 leaf("steam-update", "Steam 更新", 3, "media.steampowered.com"),
                 leaf("steam-store", "Steam 商店", 5, "store.steampowered.com"),
                 leaf(
@@ -120,8 +125,18 @@ pub fn built_in_groups() -> Vec<AccelerateProjectGroup> {
                 leaf("gh-dev", "Github Dev", 2, "github.dev"),
                 leaf("gh-api", "Github Api", 3, "api.github.com"),
                 leaf("gh-assets", "Github Assets", 4, "github.githubassets.com"),
-                leaf("gh-education", "Github Education", 5, "education.github.com"),
-                leaf("gh-resources", "Github Resources", 6, "resources.github.com"),
+                leaf(
+                    "gh-education",
+                    "Github Education",
+                    5,
+                    "education.github.com",
+                ),
+                leaf(
+                    "gh-resources",
+                    "Github Resources",
+                    6,
+                    "resources.github.com",
+                ),
                 leaf("gh-uploads", "Github Uploads", 7, "uploads.github.com"),
                 leaf(
                     "gh-archiveprogram",
@@ -129,7 +144,12 @@ pub fn built_in_groups() -> Vec<AccelerateProjectGroup> {
                     8,
                     "archiveprogram.github.com",
                 ),
-                leaf("gh-usercontent", "Github UserContent", 9, "githubusercontent.com"),
+                leaf(
+                    "gh-usercontent",
+                    "Github UserContent",
+                    9,
+                    "githubusercontent.com",
+                ),
                 // No `IPAddress` here, exactly like the official built-in data:
                 // the endpoint comes from the DoH answer. Hard-coding a US edge
                 // made every request that edge could not serve wait out the 10 s

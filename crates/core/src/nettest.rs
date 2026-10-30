@@ -78,7 +78,11 @@ pub async fn check_ipv6() -> TestResult {
     TestResult {
         name: "IPv6".to_string(),
         detail: if has { "可用" } else { "不可用" }.to_string(),
-        color: if has { TestColor::Green } else { TestColor::Orange },
+        color: if has {
+            TestColor::Green
+        } else {
+            TestColor::Orange
+        },
         latency_ms: None,
     }
 }

@@ -110,7 +110,9 @@ pub unsafe fn show_menu() -> usize {
     let (hwnd, menu) = TRAY.with(|t| {
         t.borrow()
             .as_ref()
-            .map_or((std::ptr::null_mut(), std::ptr::null_mut()), |s| (s.hwnd, s.menu))
+            .map_or((std::ptr::null_mut(), std::ptr::null_mut()), |s| {
+                (s.hwnd, s.menu)
+            })
     });
     if hwnd.is_null() || menu.is_null() {
         return 0;

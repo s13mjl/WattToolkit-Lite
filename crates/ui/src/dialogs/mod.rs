@@ -169,7 +169,12 @@ pub unsafe fn open_cert(main: HWND, fonts: Fonts, dpi: u32, info: String) {
 }
 
 unsafe fn dialog_outer_size(dpi: u32, cw: i32, ch: i32) -> (i32, i32) {
-    let mut rc = RECT { left: 0, top: 0, right: cw, bottom: ch };
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: cw,
+        bottom: ch,
+    };
     windows_sys::Win32::UI::HiDpi::AdjustWindowRectExForDpi(
         &mut rc,
         wm::WS_POPUP | wm::WS_CAPTION | wm::WS_SYSMENU,
@@ -198,13 +203,22 @@ struct CertState {
     _fonts: Fonts,
 }
 
-unsafe extern "system" fn proxy_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn proxy_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         wm::WM_CREATE => {
             let cs = &*(lparam as *const wm::CREATESTRUCTW);
             let init = Box::from_raw(cs.lpCreateParams as *mut ProxyInit);
             let state = create_proxy_ui(hwnd, init);
-            wm::SetWindowLongPtrW(hwnd, wm::GWLP_USERDATA, Box::into_raw(Box::new(state)) as isize);
+            wm::SetWindowLongPtrW(
+                hwnd,
+                wm::GWLP_USERDATA,
+                Box::into_raw(Box::new(state)) as isize,
+            );
             PROXY.with(|p| p.set(hwnd));
             register_dialog(hwnd);
             0
@@ -278,7 +292,10 @@ unsafe fn create_proxy_ui(hwnd: HWND, init: Box<ProxyInit>) -> ProxyState {
 
     let mode_label = pages::left_label(hwnd, "加速模式:", ids::proxy::MODE_LABEL, ui);
     let mode = pages::combo(hwnd, ids::proxy::MODE, ui, false);
-    let modes: Vec<&str> = ProxyMode::available().iter().map(|m| m.display_name()).collect();
+    let modes: Vec<&str> = ProxyMode::available()
+        .iter()
+        .map(|m| m.display_name())
+        .collect();
     win32::combo_fill(mode, &modes);
     win32::set_combo_sel(mode, state::mode_index(data.mode));
     let hint = pages::wrap_label(
@@ -288,7 +305,14 @@ unsafe fn create_proxy_ui(hwnd: HWND, init: Box<ProxyInit>) -> ProxyState {
         ui,
     );
     let port_label = pages::left_label(hwnd, "代理端口:", ids::proxy::PORT_LABEL, ui);
-    let port = pages::edit(hwnd, &data.port.to_string(), ids::proxy::PORT, ui, false, false);
+    let port = pages::edit(
+        hwnd,
+        &data.port.to_string(),
+        ids::proxy::PORT,
+        ui,
+        false,
+        false,
+    );
     wm::SendMessageW(port, win32::EM_SETLIMITTEXT, 5, 0);
 
     let dns_label = pages::left_label(hwnd, "DNS 服务器:", ids::proxy::DNS_LABEL, ui);
@@ -333,14 +357,42 @@ unsafe fn create_proxy_ui(hwnd: HWND, init: Box<ProxyInit>) -> ProxyState {
     win32::combo_fill(type_combo, &["HTTP", "SOCKS4", "SOCKS5"]);
     win32::set_combo_sel(type_combo, state::external_proxy_index(data.two_level_type));
     let ip_label = pages::left_label(hwnd, "地址:", ids::proxy::TWO_IP_LABEL, ui);
-    let ip = pages::edit(hwnd, &data.two_level_ip, ids::proxy::TWO_IP, ui, false, false);
+    let ip = pages::edit(
+        hwnd,
+        &data.two_level_ip,
+        ids::proxy::TWO_IP,
+        ui,
+        false,
+        false,
+    );
     let port2_label = pages::left_label(hwnd, "端口:", ids::proxy::TWO_PORT_LABEL, ui);
-    let port2 = pages::edit(hwnd, &data.two_level_port.to_string(), ids::proxy::TWO_PORT, ui, false, false);
+    let port2 = pages::edit(
+        hwnd,
+        &data.two_level_port.to_string(),
+        ids::proxy::TWO_PORT,
+        ui,
+        false,
+        false,
+    );
     wm::SendMessageW(port2, win32::EM_SETLIMITTEXT, 5, 0);
     let user_label = pages::left_label(hwnd, "用户名:", ids::proxy::TWO_USER_LABEL, ui);
-    let user = pages::edit(hwnd, &data.two_level_user, ids::proxy::TWO_USER, ui, false, false);
+    let user = pages::edit(
+        hwnd,
+        &data.two_level_user,
+        ids::proxy::TWO_USER,
+        ui,
+        false,
+        false,
+    );
     let pass_label = pages::left_label(hwnd, "密码:", ids::proxy::TWO_PASS_LABEL, ui);
-    let pass = pages::edit(hwnd, &data.two_level_password, ids::proxy::TWO_PASS, ui, false, false);
+    let pass = pages::edit(
+        hwnd,
+        &data.two_level_password,
+        ids::proxy::TWO_PASS,
+        ui,
+        false,
+        false,
+    );
     wm::SendMessageW(pass, Controls::EM_SETPASSWORDCHAR, 0x2022, 0);
 
     let ok = create_dialog_button(hwnd, "确定", wm::IDOK, ui, true);
@@ -370,8 +422,14 @@ unsafe fn create_proxy_ui(hwnd: HWND, init: Box<ProxyInit>) -> ProxyState {
     win32::place(user, Rect::new(s(136), y(444), s(150), s(26)));
     win32::place(pass_label, Rect::new(s(294), y(446), s(44), s(24)));
     win32::place(pass, Rect::new(s(342), y(444), s(184), s(26)));
-    win32::place(ok, Rect::new(s(560) - s(16) - s(90) - s(10) - s(90), y(500), s(90), s(30)));
-    win32::place(cancel, Rect::new(s(560) - s(16) - s(90), y(500), s(90), s(30)));
+    win32::place(
+        ok,
+        Rect::new(s(560) - s(16) - s(90) - s(10) - s(90), y(500), s(90), s(30)),
+    );
+    win32::place(
+        cancel,
+        Rect::new(s(560) - s(16) - s(90), y(500), s(90), s(30)),
+    );
 
     win32::show_all_children(hwnd);
     let state = ProxyState {
@@ -389,13 +447,26 @@ unsafe fn create_proxy_ui(hwnd: HWND, init: Box<ProxyInit>) -> ProxyState {
         two_port: port2,
         two_user: user,
         two_pass: pass,
-        labels: [type_label, ip_label, port2_label, user_label, pass_label, tls_hint],
+        labels: [
+            type_label,
+            ip_label,
+            port2_label,
+            user_label,
+            pass_label,
+            tls_hint,
+        ],
     };
     toggle_two_level(&state);
     state
 }
 
-unsafe fn create_dialog_button(hwnd: HWND, text: &str, id: i32, font: Gdi::HFONT, default: bool) -> HWND {
+unsafe fn create_dialog_button(
+    hwnd: HWND,
+    text: &str,
+    id: i32,
+    font: Gdi::HFONT,
+    default: bool,
+) -> HWND {
     let style = if default {
         wm::BS_DEFPUSHBUTTON as u32
     } else {
@@ -444,13 +515,19 @@ unsafe fn read_proxy(state: &ProxyState) -> ProxyDialogData {
     data.two_level_enable = win32::get_check(state.two_level);
     data.two_level_type = state::external_proxy_from_index(win32::combo_sel(state.two_type));
     data.two_level_ip = win32::text(state.two_ip);
-    data.two_level_port = state::parse_port(&win32::text(state.two_port), state.initial.two_level_port);
+    data.two_level_port =
+        state::parse_port(&win32::text(state.two_port), state.initial.two_level_port);
     data.two_level_user = win32::text(state.two_user);
     data.two_level_password = win32::text(state.two_pass);
     data
 }
 
-unsafe extern "system" fn cert_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn cert_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         wm::WM_CREATE => {
             let cs = &*(lparam as *const wm::CREATESTRUCTW);
@@ -461,7 +538,10 @@ unsafe extern "system" fn cert_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             let edit = pages::edit(hwnd, &info, ids::cert::INFO, fonts.mono, true, true);
             let close = create_dialog_button(hwnd, "关闭", wm::IDOK, fonts.ui, true);
             win32::place(edit, Rect::new(s(16), s(16), s(488), s(300)));
-            win32::place(close, Rect::new(s(520) - s(16) - s(90), s(330), s(90), s(30)));
+            win32::place(
+                close,
+                Rect::new(s(520) - s(16) - s(90), s(330), s(90), s(30)),
+            );
             win32::show_all_children(hwnd);
             let state = Box::new(CertState { _fonts: fonts });
             wm::SetWindowLongPtrW(hwnd, wm::GWLP_USERDATA, Box::into_raw(state) as isize);

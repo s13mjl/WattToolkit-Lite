@@ -161,20 +161,22 @@ where
             .filter_map(|t| t.trim().parse::<IpAddr>().ok())
             .collect()
     }
-    Ok(match Option::<serde_json::Value>::deserialize(de).unwrap_or(None) {
-        None | Some(serde_json::Value::Null) => Vec::new(),
-        Some(serde_json::Value::String(s)) => parse(&s),
-        Some(serde_json::Value::Number(n)) => parse(&n.to_string()),
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .flat_map(|item| match item {
-                serde_json::Value::String(s) => parse(s),
-                serde_json::Value::Number(n) => parse(&n.to_string()),
-                _ => Vec::new(),
-            })
-            .collect(),
-        Some(_) => Vec::new(),
-    })
+    Ok(
+        match Option::<serde_json::Value>::deserialize(de).unwrap_or(None) {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::String(s)) => parse(&s),
+            Some(serde_json::Value::Number(n)) => parse(&n.to_string()),
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .flat_map(|item| match item {
+                    serde_json::Value::String(s) => parse(s),
+                    serde_json::Value::Number(n) => parse(&n.to_string()),
+                    _ => Vec::new(),
+                })
+                .collect(),
+            Some(_) => Vec::new(),
+        },
+    )
 }
 
 impl Default for AccelerateProject {
@@ -244,7 +246,10 @@ impl AccelerateProject {
             }
             // Derive the container state from its children.
             let leaves = self.all_leaves();
-            let on = leaves.iter().filter(|l| l.three_state_enable == Some(true)).count();
+            let on = leaves
+                .iter()
+                .filter(|l| l.three_state_enable == Some(true))
+                .count();
             self.three_state_enable = if on == 0 {
                 Some(false)
             } else if on == leaves.len() {

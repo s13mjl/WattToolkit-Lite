@@ -16,6 +16,8 @@ pub enum Action {
     CertInstall,
     CertRemove,
     HostsReset,
+    OpenHostsEditor,
+    RevealHosts,
     OpenProxyDialog(ProxyDialogData),
     OpenCertDialog(String),
 }
@@ -67,6 +69,8 @@ pub fn execute(action: Action) {
                 a.toast(msg);
             });
         }
+        Action::OpenHostsEditor => open_hosts_editor(),
+        Action::RevealHosts => reveal_hosts(),
         Action::OpenProxyDialog(data) => {
             if let Some((main, fonts, dpi)) = with_app(|a| (a.hwnd, a.fonts, a.dpi)) {
                 unsafe { dialogs::open_proxy(main, fonts, dpi, data) };
@@ -76,6 +80,53 @@ pub fn execute(action: Action) {
             if let Some((main, fonts, dpi)) = with_app(|a| (a.hwnd, a.fonts, a.dpi)) {
                 unsafe { dialogs::open_cert(main, fonts, dpi, info) };
             }
+        }
+    }
+}
+
+/// Mirrors the original `OpenFileByTextReader`: VS Code from Program Files
+/// (x64, then x86), falling back to Notepad. Opening an extensionless file with
+/// ShellExecute would otherwise make Windows show the "choose an app" dialog.
+fn open_hosts_editor() {
+    let path = wtlite_core::hosts::hosts_file_path();
+    let mut editors = Vec::new();
+    for env in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(dir) = std::env::var_os(env) {
+            editors.push(
+                std::path::PathBuf::from(dir)
+                    .join("Microsoft VS Code")
+                    .join("Code.exe"),
+            );
+        }
+    }
+    editors.push(std::path::PathBuf::from("notepad.exe"));
+    for editor in editors {
+        if !editor.is_absolute() || editor.exists() {
+            if std::process::Command::new(&editor)
+                .arg(&path)
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+    if !unsafe { win32::shell_open(&path.to_string_lossy()) } {
+        log::warn!("failed to open hosts file {path:?}");
+    }
+}
+
+/// Mirrors the original `OpenFileDir` (`OpenFolder(hosts path)`), which selects
+/// the hosts file in Explorer.
+fn reveal_hosts() {
+    let path = wtlite_core::hosts::hosts_file_path();
+    if std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .is_err()
+    {
+        if let Some(dir) = path.parent() {
+            let _ = unsafe { win32::shell_open(&dir.to_string_lossy()) };
         }
     }
 }
